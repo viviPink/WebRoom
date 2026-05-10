@@ -24,6 +24,137 @@ const path = require('path');
 const socketIo = require('socket.io');
 const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
+
+
+// ============================================
+// СТРИМИНГОВАЯ ЗАПИСЬ - Хранилище сессий
+// ============================================
+
+// Хранилище активных стриминговых сессий
+const activeStreamingSessions = new Map();
+
+class StreamingSession {
+  constructor(streamingId, type, sessionId, teacherId, teacherName) {
+    this.streamingId = streamingId;
+    this.type = type;
+    this.sessionId = sessionId;
+    this.teacherId = teacherId;
+    this.teacherName = teacherName;
+    this.chunks = [];
+    this.chunkCount = 0;
+    this.startTime = Date.now();
+    this.metadata = {
+      title: null,
+      description: null,
+      duration: 0,
+      transcription: null,
+      timedTranscription: null,
+      timings: null
+    };
+    this.isFinalized = false;
+  }
+
+  addChunk(chunkBuffer, chunkIndex) {
+    this.chunks[chunkIndex] = chunkBuffer;
+    this.chunkCount++;
+  }
+
+  async finalize(metadata = {}) {
+    if (this.isFinalized) {
+      throw new Error('Session already finalized');
+    }
+
+    this.metadata = { ...this.metadata, ...metadata };
+    this.metadata.duration = Math.floor((Date.now() - this.startTime) / 1000);
+    
+    const chunksToMerge = this.chunks.filter(chunk => chunk !== undefined);
+    
+    if (chunksToMerge.length === 0) {
+      throw new Error('No chunks to finalize');
+    }
+
+    const tempDir = path.join(__dirname, 'temp_recordings');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+
+    const tempFilePath = path.join(tempDir, `${this.streamingId}_temp.webm`);
+    const writeStream = fs.createWriteStream(tempFilePath);
+    
+    return new Promise((resolve, reject) => {
+      const writeChunks = (index) => {
+        if (index >= chunksToMerge.length) {
+          writeStream.end(() => {
+            const uploadDir = path.join(__dirname, 'uploads', 
+              this.type === 'audio' ? 'audio' : 'videos');
+            
+            if (!fs.existsSync(uploadDir)) {
+              fs.mkdirSync(uploadDir, { recursive: true });
+            }
+
+            const finalFileName = `${this.streamingId}.webm`;
+            const finalPath = path.join(uploadDir, finalFileName);
+            
+            fs.rename(tempFilePath, finalPath, (err) => {
+              if (err) {
+                reject(err);
+              } else {
+                this.isFinalized = true;
+                resolve({
+                  id: this.streamingId,
+                  filePath: `/uploads/${this.type === 'audio' ? 'audio' : 'videos'}/${finalFileName}`,
+                  duration: this.metadata.duration,
+                  title: this.metadata.title,
+                  description: this.metadata.description,
+                  transcription: this.metadata.transcription,
+                  timedTranscription: this.metadata.timedTranscription,
+                  timings: this.metadata.timings,
+                  sessionId: this.sessionId,
+                  teacherId: this.teacherId,
+                  teacherName: this.teacherName,
+                  createdAt: new Date(this.startTime).toISOString()
+                });
+              }
+            });
+          });
+          return;
+        }
+
+        const chunk = chunksToMerge[index];
+        writeStream.write(chunk, () => writeChunks(index + 1));
+      };
+
+      writeChunks(0);
+    });
+  }
+
+  cancel() {
+    this.chunks = [];
+    this.isFinalized = true;
+    
+    const tempFilePath = path.join(__dirname, 'temp_recordings', `${this.streamingId}_temp.webm`);
+    if (fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+    }
+  }
+}
+
+// Очистка старых сессий каждые 30 минут
+setInterval(() => {
+  const now = Date.now();
+  const ONE_HOUR = 60 * 60 * 1000;
+  
+  for (const [streamingId, session] of activeStreamingSessions.entries()) {
+    if (now - session.startTime > ONE_HOUR && !session.isFinalized) {
+      session.cancel();
+      activeStreamingSessions.delete(streamingId);
+      console.log(`Cleaned up stale session: ${streamingId}`);
+    }
+  }
+}, 30 * 60 * 1000);
+
+
+
 require('dotenv').config();
 const axios = require('axios');
 const FormData = require('form-data');
@@ -76,6 +207,289 @@ if (!fs.existsSync(uploadsDir)) {
 if (!fs.existsSync(audioDir)) {
   fs.mkdirSync(audioDir, { recursive: true });
 }
+// Создаем директорию для видео и временных файлов
+const videosDir = path.join(uploadsDir, 'videos');
+if (!fs.existsSync(videosDir)) {
+  fs.mkdirSync(videosDir, { recursive: true });
+}
+
+const tempRecordingsDir = path.join(__dirname, 'temp_recordings');
+if (!fs.existsSync(tempRecordingsDir)) {
+  fs.mkdirSync(tempRecordingsDir, { recursive: true });
+}
+// Настройка multer для материалов (сохраняем в отдельную папку)
+const materialsDir = path.join(uploadsDir, 'materials');
+if (!fs.existsSync(materialsDir)) {
+  fs.mkdirSync(materialsDir, { recursive: true });
+}
+
+const materialStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, materialsDir);
+  },
+  filename: function (req, file, cb) {
+    const sessionId = req.body.sessionId || req.params.sessionId || 'unknown';
+    const teacherId = req.body.teacherId || 'unknown';
+    const timestamp = Date.now();
+    const randomId = uuidv4().slice(0, 8);
+    const ext = path.extname(file.originalname);
+    const safeName = file.originalname
+      .replace(/[^a-zA-Zа-яА-Я0-9.-]/g, '_')
+      .substring(0, 50);
+    const filename = `material_${sessionId}_${teacherId}_${timestamp}_${randomId}${ext}`;
+    cb(null, filename);
+  }
+});
+
+const uploadMaterial = multer({
+  storage: materialStorage,
+  limits: {
+    fileSize: 100 * 1024 * 1024 // 100 MB
+  }
+});
+
+/**
+ * Загрузка материала к лекции (для преподавателя)
+ * POST /api/materials/upload
+ */
+app.post('/api/materials/upload', uploadMaterial.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Файл не загружен' });
+    }
+
+    const { sessionId, teacherId, courseId, description, originalName } = req.body;
+    
+    if (!sessionId || !teacherId) {
+      // Удаляем файл если есть ошибка
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(400).json({ error: 'sessionId и teacherId обязательны' });
+    }
+
+    const filePath = `/uploads/materials/${req.file.filename}`;
+    const fileSize = req.file.size;
+    const fileType = req.file.mimetype;
+    const displayName = originalName || req.file.originalname;
+
+    const result = await pool.query(
+      `INSERT INTO "LectureMaterial" 
+       ("sessionId", "teacherId", "courseId", "fileName", "originalName", 
+        "filePath", "fileSize", "fileType", "description", "createdAt") 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW()) 
+       RETURNING *`,
+      [sessionId, teacherId, courseId || null, req.file.filename, displayName, 
+       filePath, fileSize, fileType, description || '']
+    );
+
+    // Отправляем уведомление через WebSocket, если сессия активна
+    const roomName = `session_${sessionId}`;
+    io.to(roomName).emit('material_added', {
+      material: result.rows[0],
+      timestamp: new Date()
+    });
+
+    res.json({
+      success: true,
+      material: result.rows[0],
+      message: 'Материал успешно загружен'
+    });
+  } catch (err) {
+    console.error('Ошибка загрузки материала:', err);
+    if (req.file && fs.existsSync(req.file.path)) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch(e) {}
+    }
+    res.status(500).json({ 
+      error: 'Ошибка сохранения материала',
+      details: err.message
+    });
+  }
+});
+
+/**
+ * Получение материалов для сессии
+ * GET /api/materials/session/:sessionId
+ */
+app.get('/api/materials/session/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const result = await pool.query(
+      `SELECT m.*, t.name as "teacherName"
+       FROM "LectureMaterial" m
+       LEFT JOIN "Teacher" t ON m."teacherId" = t.id
+       WHERE m."sessionId" = $1
+       ORDER BY m."createdAt" DESC`,
+      [sessionId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Ошибка получения материалов:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+/**
+ * Получение материалов для сессии с конспектами (для студента)
+ * GET /api/materials/session/:sessionId/with-summaries
+ */
+app.get('/api/materials/session/:sessionId/with-summaries', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    // Получаем материалы
+    const materialsResult = await pool.query(
+      `SELECT m.*, t.name as "teacherName"
+       FROM "LectureMaterial" m
+       LEFT JOIN "Teacher" t ON m."teacherId" = t.id
+       WHERE m."sessionId" = $1
+       ORDER BY m."createdAt" DESC`,
+      [sessionId]
+    );
+    
+    // Получаем конспекты (привязанные к сессии)
+    const summariesResult = await pool.query(
+      `SELECT ar.*
+       FROM "AudioRecording" ar
+       WHERE ar."sessionId" = $1
+         AND (ar."aiSummary" IS NOT NULL 
+           OR ar."aiBulletPoints" IS NOT NULL 
+           OR ar."aiStructure" IS NOT NULL
+           OR ar."timedTranscription" IS NOT NULL)
+       ORDER BY ar."createdAt" DESC`,
+      [sessionId]
+    );
+    
+    res.json({
+      materials: materialsResult.rows,
+      summaries: summariesResult.rows
+    });
+  } catch (err) {
+    console.error('Ошибка получения материалов с конспектами:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+/**
+ * Получение всех материалов для курса (для дашборда студента)
+ * GET /api/materials/course/:courseId
+ */
+app.get('/api/materials/course/:courseId', async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const result = await pool.query(
+      `SELECT m.*, s."startTime" as "sessionDate", c.title as "courseTitle", t.name as "teacherName"
+       FROM "LectureMaterial" m
+       JOIN "Session" s ON m."sessionId" = s.id
+       JOIN "Course" c ON s."courseId" = c.id
+       JOIN "Teacher" t ON m."teacherId" = t.id
+       WHERE s."courseId" = $1
+       ORDER BY s."startTime" DESC, m."createdAt" DESC`,
+      [courseId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Ошибка получения материалов курса:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+/**
+ * Получение материалов, доступных студенту (из посещенных сессий)
+ * GET /api/materials/student/:studentId
+ */
+app.get('/api/materials/student/:studentId', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const result = await pool.query(
+      `SELECT DISTINCT 
+        m.*,
+        s."startTime" as "sessionDate",
+        c.title as "courseTitle",
+        t.name as "teacherName",
+        sess."subjectName"
+       FROM "LectureMaterial" m
+       JOIN "Session" sess ON m."sessionId" = sess.id
+       JOIN "Course" c ON sess."courseId" = c.id
+       JOIN "Teacher" t ON m."teacherId" = t.id
+       JOIN "Attendance" a ON a."sessionId" = sess.id
+       WHERE a."studentId" = $1
+       ORDER BY sess."startTime" DESC, m."createdAt" DESC`,
+      [studentId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Ошибка получения материалов студента:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+/**
+ * Удаление материала
+ * DELETE /api/materials/:materialId
+ */
+app.delete('/api/materials/:materialId', async (req, res) => {
+  try {
+    // Сначала получаем информацию о файле
+    const result = await pool.query(
+      'SELECT * FROM "LectureMaterial" WHERE id = $1',
+      [req.params.materialId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Материал не найден' });
+    }
+    
+    const material = result.rows[0];
+    const filePath = path.join(materialsDir, material.fileName);
+    
+    // Удаляем файл с диска
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+    
+    // Удаляем запись из БД
+    await pool.query('DELETE FROM "LectureMaterial" WHERE id = $1', [req.params.materialId]);
+    
+    res.json({ success: true, message: 'Материал удален' });
+  } catch (err) {
+    console.error('Ошибка удаления материала:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+/**
+ * Обновление описания материала
+ * PATCH /api/materials/:materialId
+ */
+app.patch('/api/materials/:materialId', async (req, res) => {
+  const { materialId } = req.params;
+  const { description } = req.body;
+  
+  try {
+    const result = await pool.query(
+      `UPDATE "LectureMaterial" 
+       SET description = $1, "updatedAt" = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [description, materialId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Материал не найден' });
+    }
+    
+    res.json({ success: true, material: result.rows[0] });
+  } catch (err) {
+    console.error('Ошибка обновления материала:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Раздача статических файлов материалов
+app.use('/uploads/materials', express.static(materialsDir));
 
 // настройка multer - загрузка файлов 
 /**
@@ -142,6 +556,27 @@ app.use(cors({
 app.use(express.json());      // Парсинг JSON тела запроса
 app.use(express.static(path.join(__dirname, 'public')));
 
+const { createProxyMiddleware } = require('http-proxy-middleware');
+
+// Прокси для Whisper сервера
+app.use('/api/whisper', createProxyMiddleware({
+  target: 'http://localhost:5000',
+  changeOrigin: true,
+  pathRewrite: {
+    '^/api/whisper': ''  // убираем /api/whisper из пути
+  },
+  onError: (err, req, res) => {
+    console.error('Proxy error:', err);
+    res.status(500).json({ error: 'Whisper сервер недоступен' });
+  }
+}));
+
+// Конфигурация multer для чанков стриминга
+const chunkUpload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
+
 /**
  Логирующий middleware
   Записывает все входящие запросы и их тела (для POST/PUT)
@@ -172,6 +607,56 @@ const io = socketIo(server, {
 // порт сервера
 const HTTP_PORT = process.env.PORT || 3001;
 const HTTPS_PORT = process.env.HTTPS_PORT || 3002;
+
+
+
+// Получение материалов прошлых занятий по сессии
+app.get('/api/sessions/:sessionId/past-materials', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    // Получаем информацию о текущей сессии
+    const sessionQuery = await pool.query(
+      'SELECT "courseId", "teacherId" FROM "Session" WHERE id = $1',
+      [sessionId]
+    );
+    
+    if (sessionQuery.rows.length === 0) {
+      return res.status(404).json({ error: 'Сессия не найдена' });
+    }
+    
+    const { courseId, teacherId } = sessionQuery.rows[0];
+    
+    // Ищем записи по этому же курсу, исключая текущую сессию
+    const recordingsQuery = await pool.query(
+      `SELECT 
+        r.*,
+        c.title as course_title,
+        s."startTime" as session_date
+      FROM "AudioRecording" r
+      LEFT JOIN "Course" c ON r."courseId" = c.id
+      LEFT JOIN "Session" s ON r."sessionId" = s.id
+      WHERE r."courseId" = $1 
+        AND r."sessionId" != $2
+        AND r."teacherId" = $3
+      ORDER BY r."createdAt" DESC
+      LIMIT 20`,
+      [courseId, sessionId, teacherId]
+    );
+    
+    res.json({
+      success: true,
+      recordings: recordingsQuery.rows,
+      count: recordingsQuery.rows.length,
+      courseId: courseId
+    });
+  } catch (err) {
+    console.error('Ошибка получения прошлых материалов:', err);
+    res.status(500).json({ error: 'Ошибка получения материалов' });
+  }
+});
+
+
 
 app.post('/api/teacher/groups-subjects/import', async (req, res) => {
   const { teacherId, fileData } = req.body;
@@ -401,132 +886,7 @@ app.get('/api/courses/:courseId/sessions', async (req, res) => {
   }
 });
 
-/**
- * GET /api/teacher/:teacherId/attendance/report
- * Возвращает отчёт по посещаемости с фильтрами и статистикой
- */
-app.get('/api/teacher/:teacherId/attendance/report', async (req, res) => {
-  try {
-    const { courseId, sessionId, group, studentName, studentId, dateFrom, dateTo } = req.query;
-    
-    // Базовый запрос (исправлен под реальную схему БД)
-    let query = `
-      SELECT 
-        a.id as "attendanceId",
-        a."studentId",
-        a."sessionId",
-        a."joinedAt" as "joinTime",
-        s."full_name" as "studentName",
-        s."group",
-        c.title as "courseTitle",
-        c.id as "courseId",
-        sess."startTime" as "sessionDate",
-        sess."endTime",
-        'Присутствовал' as "status"
-      FROM "Attendance" a
-      JOIN "Student" s ON a."studentId" = s.id
-      JOIN "Session" sess ON a."sessionId" = sess.id
-      JOIN "Course" c ON sess."courseId" = c.id
-      WHERE c."teacherId" = $1
-    `;
-    
-    const params = [req.params.teacherId];
-    let paramIndex = 2;
-    
-    // Добавляем фильтры
-    if (courseId) {
-      query += ` AND c.id = $${paramIndex}`;
-      params.push(courseId);
-      paramIndex++;
-    }
-    
-    if (sessionId) {
-      query += ` AND a."sessionId" = $${paramIndex}`;
-      params.push(sessionId);
-      paramIndex++;
-    }
-    
-    if (group) {
-      query += ` AND s."group" ILIKE $${paramIndex}`;
-      params.push(`%${group}%`);
-      paramIndex++;
-    }
-    
-    if (studentName) {
-      query += ` AND s."full_name" ILIKE $${paramIndex}`;
-      params.push(`%${studentName}%`);
-      paramIndex++;
-    }
-    
-    if (studentId) {
-      query += ` AND a."studentId" = $${paramIndex}`;
-      params.push(studentId);
-      paramIndex++;
-    }
-    
-    if (dateFrom) {
-      query += ` AND sess."startTime" >= $${paramIndex}`;
-      params.push(dateFrom);
-      paramIndex++;
-    }
-    
-    if (dateTo) {
-      query += ` AND sess."startTime" <= $${paramIndex}`;
-      params.push(dateTo);
-      paramIndex++;
-    }
-    
-    query += ` ORDER BY a."joinedAt" DESC`;
-    
-    const result = await pool.query(query, params);
-    
-    // Получаем статистику
-    const statsQuery = `
-      SELECT 
-        COUNT(DISTINCT a."studentId") as "totalStudents",
-        COUNT(DISTINCT a."sessionId") as "totalSessions",
-        COUNT(DISTINCT s."group") as "uniqueGroups"
-      FROM "Attendance" a
-      JOIN "Student" s ON a."studentId" = s.id
-      JOIN "Session" sess ON a."sessionId" = sess.id
-      JOIN "Course" c ON sess."courseId" = c.id
-      WHERE c."teacherId" = $1
-    `;
-    
-    const statsResult = await pool.query(statsQuery, [req.params.teacherId]);
-    const stats = statsResult.rows[0];
-    
-    // Считаем среднюю посещаемость
-    const totalStudentsInCourses = await pool.query(
-      `SELECT COUNT(DISTINCT s.id) as "count"
-       FROM "Student" s
-       JOIN "Attendance" a ON a."studentId" = s.id
-       JOIN "Session" sess ON a."sessionId" = sess.id
-       JOIN "Course" c ON sess."courseId" = c.id
-       WHERE c."teacherId" = $1`,
-      [req.params.teacherId]
-    );
-    
-    const totalStudents = parseInt(totalStudentsInCourses.rows[0].count) || 1;
-    const averageAttendance = stats.totalStudents > 0 
-      ? Math.round((stats.totalStudents / totalStudents) * 100) 
-      : 0;
-    
-    res.json({
-      attendance: result.rows,
-      stats: {
-        totalStudents: parseInt(stats.totalStudents) || 0,
-        totalSessions: parseInt(stats.totalSessions) || 0,
-        averageAttendance: averageAttendance,
-        uniqueGroups: parseInt(stats.uniqueGroups) || 0,
-        attendanceByCourse: []
-      }
-    });
-  } catch (err) {
-    console.error('Ошибка получения отчёта по посещаемости:', err);
-    res.status(500).json({ error: 'Ошибка сервера', details: err.message });
-  }
-});
+
 
 
 
@@ -620,81 +980,222 @@ app.post('/api/teacher/courses/create', async (req, res) => {
  * GET /api/student/:studentId/missed-sessions
  */
 app.get('/api/student/:studentId/missed-sessions', async (req, res) => {
-  const { studentId } = req.params;
-  
-  try {
-    // Получаем информацию о студенте
-    const studentResult = await pool.query(
-      'SELECT id, "full_name", "group", "groupId" FROM "Student" WHERE id = $1',
-      [studentId]
-    );
+    const { studentId } = req.params;
     
-    if (studentResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Студент не найден' });
+    try {
+        const studentResult = await pool.query(
+            'SELECT id, "full_name", "group", "groupId" FROM "Student" WHERE id = $1',
+            [studentId]
+        );
+        
+        if (studentResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Студент не найден' });
+        }
+        
+        const student = studentResult.rows[0];
+        const groupId = student.groupId;
+        
+        if (!groupId) {
+            console.log(`Студент ${studentId} не привязан к группе`);
+            return res.json([]);
+        }
+        
+        const missedQuery = `
+            SELECT 
+                s.id,
+                s."courseId",
+                s."isActive",
+                s."startTime",
+                s."endTime",
+                s."description",
+                s."groupId",
+                s."subjectName",
+                c.title as "courseTitle",
+                t.name as "teacherName",
+                g.name as "groupName",
+                ar."filePath" as "recordingPath",
+                ar."transcription",
+                ar."timedTranscription",
+                ar."aiSummary",
+                ar."aiBulletPoints",
+                ar."aiStructure",
+                ar."aiQuestions",
+                ar."createdAt" as "recordingCreatedAt",
+                ar."title" as "recordingTitle",
+                COALESCE(msr."hasReviewed", FALSE) as "hasReviewed",
+                msr."reviewedAt"
+            FROM "Session" s
+            JOIN "Course" c ON s."courseId" = c.id
+            JOIN "Teacher" t ON c."teacherId" = t.id
+            LEFT JOIN "Group" g ON s."groupId" = g.id
+            LEFT JOIN "AudioRecording" ar ON ar."sessionId" = s.id AND (ar."type" = 'audio' OR ar."type" IS NULL)
+            LEFT JOIN "MissedSessionReview" msr ON msr."sessionId" = s.id AND msr."studentId" = $2
+            WHERE s."groupId" = $1
+                AND s."isActive" = false
+                AND s."endTime" IS NOT NULL
+                AND s.id NOT IN (
+                    SELECT a."sessionId" 
+                    FROM "Attendance" a 
+                    WHERE a."studentId" = $2
+                )
+            ORDER BY s."startTime" DESC
+        `;
+        
+        const missedResult = await pool.query(missedQuery, [groupId, studentId]);
+        
+        res.json(missedResult.rows);
+    } catch (err) {
+        console.error('Ошибка получения пропущенных занятий:', err);
+        res.status(500).json({ error: 'Ошибка сервера', details: err.message });
     }
-    
-    const student = studentResult.rows[0];
-    const groupId = student.groupId;
-    
-    if (!groupId) {
-      console.log(`Студент ${studentId} не привязан к группе`);
-      return res.json([]);
-    }
-    
-    // Находим все завершенные сессии для группы студента, на которых он не был
-    // и подтягиваем конспекты из AudioRecording
-    const missedQuery = `
-      SELECT 
-        s.id,
-        s."courseId",
-        s."isActive",
-        s."startTime",
-        s."endTime",
-        s."description",
-        s."groupId",
-        s."subjectName",
-        c.title as "courseTitle",
-        t.name as "teacherName",
-        g.name as "groupName",
-        ar."filePath" as "recordingPath",
-        ar."transcription",
-        ar."timedTranscription",
-        ar."aiSummary",
-        ar."aiBulletPoints",
-        ar."aiStructure",
-        ar."aiQuestions",
-        ar."createdAt" as "recordingCreatedAt",
-        ar."title" as "recordingTitle"
-      FROM "Session" s
-      JOIN "Course" c ON s."courseId" = c.id
-      JOIN "Teacher" t ON c."teacherId" = t.id
-      LEFT JOIN "Group" g ON s."groupId" = g.id
-      LEFT JOIN "AudioRecording" ar ON ar."sessionId" = s.id AND (ar."type" = 'audio' OR ar."type" IS NULL)
-      WHERE s."groupId" = $1
-        AND s."isActive" = false
-        AND s."endTime" IS NOT NULL
-        AND s.id NOT IN (
-          SELECT a."sessionId" 
-          FROM "Attendance" a 
-          WHERE a."studentId" = $2
-        )
-      ORDER BY s."startTime" DESC
-    `;
-    
-    const missedResult = await pool.query(missedQuery, [groupId, studentId]);
-    
-    console.log(`Найдено пропущенных занятий для студента ${studentId}: ${missedResult.rows.length}`);
-    console.log(`Из них с конспектами: ${missedResult.rows.filter(r => r.timedTranscription || r.aiSummary || r.aiBulletPoints || r.aiStructure || r.aiQuestions).length}`);
-    
-    res.json(missedResult.rows);
-  } catch (err) {
-    console.error('Ошибка получения пропущенных занятий:', err);
-    res.status(500).json({ error: 'Ошибка сервера', details: err.message });
-  }
 });
 
 
+/**
+ * Отметка об ознакомлении с пропущенным занятием
+ * POST /api/student/:studentId/missed/:sessionId/review
+ */
+app.post('/api/student/:studentId/missed/:sessionId/review', async (req, res) => {
+    const { studentId, sessionId } = req.params;
+    
+    try {
+        const existing = await pool.query(
+            `SELECT * FROM "MissedSessionReview" 
+             WHERE "studentId" = $1 AND "sessionId" = $2`,
+            [studentId, sessionId]
+        );
+        
+        let result;
+        if (existing.rows.length > 0) {
+            result = await pool.query(
+                `UPDATE "MissedSessionReview" 
+                 SET "hasReviewed" = TRUE, "reviewedAt" = NOW()
+                 WHERE "studentId" = $1 AND "sessionId" = $2
+                 RETURNING *`,
+                [studentId, sessionId]
+            );
+        } else {
+            result = await pool.query(
+                `INSERT INTO "MissedSessionReview" ("studentId", "sessionId", "hasReviewed", "reviewedAt")
+                 VALUES ($1, $2, TRUE, NOW())
+                 RETURNING *`,
+                [studentId, sessionId]
+            );
+        }
+        
+        res.json({ 
+            success: true, 
+            review: result.rows[0],
+            message: 'Занятие отмечено как ознакомленное'
+        });
+    } catch (err) {
+        console.error('Ошибка отметки ознакомления:', err);
+        res.status(500).json({ error: 'Ошибка сервера' });
+    }
+});
 
+/**
+ * Снять отметку об ознакомлении
+ * DELETE /api/student/:studentId/missed/:sessionId/review
+ */
+app.delete('/api/student/:studentId/missed/:sessionId/review', async (req, res) => {
+    const { studentId, sessionId } = req.params;
+    
+    try {
+        await pool.query(
+            `DELETE FROM "MissedSessionReview" 
+             WHERE "studentId" = $1 AND "sessionId" = $2`,
+            [studentId, sessionId]
+        );
+        
+        res.json({ 
+            success: true, 
+            message: 'Отметка ознакомления снята'
+        });
+    } catch (err) {
+        console.error('Ошибка снятия отметки:', err);
+        res.status(500).json({ error: 'Ошибка сервера' });
+    }
+});
+
+/**
+ * Получение пропущенных занятий с информацией об ознакомлении
+ * Обновляем существующий эндпоинт
+ */
+app.get('/api/student/:studentId/missed-sessions', async (req, res) => {
+    const { studentId } = req.params;
+    
+    try {
+        const studentResult = await pool.query(
+            'SELECT id, "full_name", "group", "groupId" FROM "Student" WHERE id = $1',
+            [studentId]
+        );
+        
+        if (studentResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Студент не найден' });
+        }
+        
+        const student = studentResult.rows[0];
+        const groupId = student.groupId;
+        
+        if (!groupId) {
+            console.log(`Студент ${studentId} не привязан к группе`);
+            return res.json([]);
+        }
+        
+        // Исправленный запрос с информацией об ознакомлении
+        const missedQuery = `
+            SELECT 
+                s.id,
+                s."courseId",
+                s."isActive",
+                s."startTime",
+                s."endTime",
+                s."description",
+                s."groupId",
+                s."subjectName",
+                c.title as "courseTitle",
+                t.name as "teacherName",
+                g.name as "groupName",
+                ar."filePath" as "recordingPath",
+                ar."transcription",
+                ar."timedTranscription",
+                ar."aiSummary",
+                ar."aiBulletPoints",
+                ar."aiStructure",
+                ar."aiQuestions",
+                ar."createdAt" as "recordingCreatedAt",
+                ar."title" as "recordingTitle",
+                COALESCE(msr."hasReviewed", FALSE) as "hasReviewed",
+                msr."reviewedAt"
+            FROM "Session" s
+            JOIN "Course" c ON s."courseId" = c.id
+            JOIN "Teacher" t ON c."teacherId" = t.id
+            LEFT JOIN "Group" g ON s."groupId" = g.id
+            LEFT JOIN "AudioRecording" ar ON ar."sessionId" = s.id AND (ar."type" = 'audio' OR ar."type" IS NULL)
+            LEFT JOIN "MissedSessionReview" msr ON msr."sessionId" = s.id AND msr."studentId" = $2
+            WHERE s."groupId" = $1
+                AND s."isActive" = false
+                AND s."endTime" IS NOT NULL
+                AND s.id NOT IN (
+                    SELECT a."sessionId" 
+                    FROM "Attendance" a 
+                    WHERE a."studentId" = $2
+                )
+            ORDER BY s."startTime" DESC
+        `;
+        
+        const missedResult = await pool.query(missedQuery, [groupId, studentId]);
+        
+        console.log(`Найдено пропущенных занятий для студента ${studentId}: ${missedResult.rows.length}`);
+        console.log(`Ознакомлено: ${missedResult.rows.filter(r => r.hasReviewed).length}`);
+        
+        res.json(missedResult.rows);
+    } catch (err) {
+        console.error('Ошибка получения пропущенных занятий:', err);
+        res.status(500).json({ error: 'Ошибка сервера', details: err.message });
+    }
+});
 
 
 // В эндпоинте POST /api/teacher/sessions/schedule
@@ -788,10 +1289,10 @@ app.post('/api/teacher/sessions/start-scheduled', async (req, res) => {
     const session = scheduled.rows[0];
     
     // Создаем активную сессию
-    const activeSession = await client.query(
-      'INSERT INTO "Session" ("courseId", "isActive", "startTime", "description") VALUES ($1, true, NOW(), $2) RETURNING *',
-      [session.courseId, session.description || session.title]
-    );
+  const activeSession = await client.query(
+  'INSERT INTO "Session" ("courseId", "groupId", "subjectName", "isActive", "startTime", "description") VALUES ($1, $2, $3, true, NOW(), $4) RETURNING *',
+  [session.courseId, session.groupId || null, session.subjectName || null, session.description || session.title]
+);
     
     // Помечаем запланированную сессию как активную (или удаляем)
     await client.query(
@@ -854,7 +1355,82 @@ app.get('/api/teacher/:teacherId/sessions/active', async (req, res) => {
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 });
+/**
+ Получение всех активных сессий
+ GET /api/sessions/active
+ Возвращает все активные сессии с информацией о курсе и преподавателе
+ Используется студентами для просмотра доступных вебинаров
+ 
+ Ответ: массив объектов Session с полями courseTitle и teacherName
+ */
+app.get('/api/sessions/active', async (req, res) => {
+  try {
+    // Сначала проверим, есть ли активные сессии
+    const checkQuery = await pool.query(`
+      SELECT EXISTS (
+        SELECT 1 FROM "Session" WHERE "isActive" = true
+      )
+    `);
+    
+    console.log('Есть активные сессии?', checkQuery.rows[0].exists);
+    
+    const result = await pool.query(
+      `SELECT 
+        s.id,
+        s."courseId",
+        s."isActive",
+        s."startTime",
+        s."endTime",
+        s.description,
+        s."groupId",
+        s."subjectName",
+        c.title as "courseTitle",
+        t.name as "teacherName" 
+       FROM "Session" s 
+       JOIN "Course" c ON s."courseId" = c.id 
+       JOIN "Teacher" t ON c."teacherId" = t.id 
+       WHERE s."isActive" = true
+       ORDER BY s."startTime" DESC`
+    );
+    
+    console.log(`Найдено активных сессий: ${result.rows.length}`);
+    
+    // Если нет активных сессий, вернем пустой массив, а не ошибку
+    res.json(result.rows || []);
+  } catch (err) {
+    console.error('Ошибка получения активных сессий:', err);
+    // Возвращаем пустой массив вместо ошибки 500, чтобы UI не ломался
+    res.status(200).json([]);
+  }
+});
 
+/**
+ * GET /api/sessions/:sessionId
+ * Получение информации о конкретной сессии
+ */
+app.get('/api/sessions/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    const result = await pool.query(
+      `SELECT s.*, c.title as "courseTitle", c.id as "courseId", t.name as "teacherName"
+       FROM "Session" s 
+       JOIN "Course" c ON s."courseId" = c.id 
+       JOIN "Teacher" t ON c."teacherId" = t.id 
+       WHERE s.id = $1`,
+      [sessionId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Сессия не найдена' });
+    }
+    
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Ошибка получения сессии:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
 /**
  Завершение сессии
   POST /api/sessions/:sessionId/finish
@@ -908,29 +1484,7 @@ app.post('/api/student/login', async (req, res) => {
   }
 });
 
-/**
- Получение всех активных сессий
-  GET /api/sessions/active
-  Возвращает все активные сессии с информацией о курсе и преподавателе
-  Используется студентами для просмотра доступных вебинаров
-  
-  Ответ: массив объектов Session с полями courseTitle и teacherName
- */
-app.get('/api/sessions/active', async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT s.*, c.title as "courseTitle", t.name as "teacherName" 
-       FROM "Session" s 
-       JOIN "Course" c ON s."courseId" = c.id 
-       JOIN "Teacher" t ON c."teacherId" = t.id 
-       WHERE s."isActive" = true`
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error('Ошибка:', err);
-    res.status(500).json({ error: 'Ошибка сервера' });
-  }
-});
+
 
 /**
   Отметка о посещении студентом 
@@ -1066,35 +1620,72 @@ app.post('/api/audio/upload', upload.single('audio'), async (req, res) => {
       timings
     } = req.body;
     
+    console.log('Загрузка аудио:', {
+      sessionId,
+      teacherId,
+      title,
+      duration,
+      fileName: req.file.filename,
+      fileSize: req.file.size,
+      timingsType: typeof timings,
+      timingsValue: timings ? timings.substring(0, 100) : 'null'
+    });
+    
     const filePath = `/uploads/audio/${req.file.filename}`;
     const fileSize = req.file.size;
+    const durationNum = parseInt(duration) || 0;
+    const teacherIdNum = parseInt(teacherId);
+    const sessionIdNum = sessionId ? parseInt(sessionId) : null;
+    
+    // Парсим timings только если это строка и не пустая
+    let timingsData = null;
+    if (timings && timings !== 'undefined' && timings !== 'null' && timings !== '') {
+      try {
+        // Если timings уже объект, используем его
+        if (typeof timings === 'object') {
+          timingsData = timings;
+        } else {
+          timingsData = JSON.parse(timings);
+        }
+        console.log('Timings parsed successfully, length:', Array.isArray(timingsData) ? timingsData.length : 'object');
+      } catch(e) {
+        console.error('Ошибка парсинга timings:', e.message);
+        timingsData = null; // Если ошибка, сохраняем null
+      }
+    }
+    
+    // Сохраняем в базу данных - без timings поля если есть проблемы
+    let result;
+    try {
+      result = await pool.query(
+        `INSERT INTO "AudioRecording" 
+         ("sessionId", "teacherId", "fileName", "filePath", "fileSize", 
+          "duration", "title", "description", "transcription", 
+          "timedTranscription", "type", "createdAt") 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()) 
+         RETURNING *`,
+        [
+          sessionIdNum, 
+          teacherIdNum, 
+          req.file.filename, 
+          filePath, 
+          fileSize, 
+          durationNum, 
+          title || 'Без названия', 
+          description || '', 
+          transcription || '',
+          timedTranscription || '',
+          'audio'
+        ]
+      );
+    } catch(dbErr) {
+      console.error('Ошибка БД:', dbErr);
+      throw dbErr;
+    }
 
-    // Сохраняем все виды конспектов
-    const result = await pool.query(
-      `INSERT INTO "AudioRecording" 
-       ("sessionId", "teacherId", "fileName", "filePath", "fileSize", 
-        "duration", "title", "description", "transcription", 
-        "timedTranscription", "timings", "type") 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) 
-       RETURNING *`,
-      [
-        sessionId, 
-        teacherId, 
-        req.file.filename, 
-        filePath, 
-        fileSize, 
-        duration, 
-        title, 
-        description, 
-        transcription || '',
-        timedTranscription || '',
-        timings ? JSON.parse(timings) : null,
-        'audio'
-      ]
-    );
-
-    if (sessionId) {
-      const roomName = `session_${sessionId}`;
+    // Отправляем уведомление через WebSocket
+    if (sessionIdNum && io) {
+      const roomName = `session_${sessionIdNum}`;
       io.to(roomName).emit('audio_recording_added', {
         recording: result.rows[0],
         timestamp: new Date()
@@ -1108,7 +1699,19 @@ app.post('/api/audio/upload', upload.single('audio'), async (req, res) => {
     });
   } catch (err) {
     console.error('Ошибка загрузки аудио:', err);
-    res.status(500).json({ error: 'Ошибка сохранения аудиозаписи' });
+    // Удаляем файл если была ошибка
+    if (req.file && fs.existsSync(req.file.path)) {
+      try {
+        fs.unlinkSync(req.file.path);
+        console.log('Файл удален:', req.file.path);
+      } catch(e) {
+        console.error('Ошибка удаления файла:', e);
+      }
+    }
+    res.status(500).json({ 
+      error: 'Ошибка сохранения аудиозаписи',
+      details: err.message
+    });
   }
 });
 /**
@@ -2444,6 +3047,27 @@ app.put('/api/audio/:recordingId/transcription/edit', async (req, res) => {
 });
 
 
+
+
+
+app.get('/api/teacher/:teacherId/sessions/completed/count', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT COUNT(*) as count 
+       FROM "Session" s
+       JOIN "Course" c ON s."courseId" = c.id
+       WHERE c."teacherId" = $1 
+         AND s."isActive" = false 
+         AND s."endTime" IS NOT NULL`,
+      [req.params.teacherId]
+    );
+    res.json({ count: parseInt(result.rows[0].count) });
+  } catch (err) {
+    console.error('Ошибка получения статистики:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
 /**
  GET /api/debug/audio/:id
  Возвращает данные из таблицы AudioRecording для отладки
@@ -3515,141 +4139,138 @@ app.get('/api/teacher/:teacherId/subjects', async (req, res) => {
 
 
 
-/**
- * Обновленный эндпоинт для получения отчета по посещаемости с фильтром по группе и предмету
- * GET /api/teacher/:teacherId/attendance/report
- */
 app.get('/api/teacher/:teacherId/attendance/report', async (req, res) => {
-    try {
-        const { courseId, sessionId, group, studentName, studentId, dateFrom, dateTo, subjectName } = req.query;
-        
-        let query = `
-            SELECT 
-                a.id as "attendanceId",
-                a."studentId",
-                a."sessionId",
-                a."joinedAt" as "joinTime",
-                s."full_name" as "studentName",
-                s."group",
-                s."groupId",
-                c.title as "courseTitle",
-                c.id as "courseId",
-                sess."startTime" as "sessionDate",
-                sess."endTime",
-                sess."subjectName" as "subject",
-                g.name as "groupName",
-                'Присутствовал' as "status"
-            FROM "Attendance" a
-            JOIN "Student" s ON a."studentId" = s.id
-            JOIN "Session" sess ON a."sessionId" = sess.id
-            JOIN "Course" c ON sess."courseId" = c.id
-            JOIN "Group" g ON s."groupId" = g.id
-            WHERE c."teacherId" = $1
-        `;
-        
-        const params = [req.params.teacherId];
-        let paramIndex = 2;
-        
-        if (courseId) {
-            query += ` AND c.id = $${paramIndex}`;
-            params.push(courseId);
-            paramIndex++;
-        }
-        
-        if (sessionId) {
-            query += ` AND a."sessionId" = $${paramIndex}`;
-            params.push(sessionId);
-            paramIndex++;
-        }
-        
-        if (group) {
-            query += ` AND g.name ILIKE $${paramIndex}`;
-            params.push(`%${group}%`);
-            paramIndex++;
-        }
-        
-        if (studentName) {
-            query += ` AND s."full_name" ILIKE $${paramIndex}`;
-            params.push(`%${studentName}%`);
-            paramIndex++;
-        }
-        
-        if (studentId) {
-            query += ` AND a."studentId" = $${paramIndex}`;
-            params.push(studentId);
-            paramIndex++;
-        }
-        
-        if (dateFrom) {
-            query += ` AND sess."startTime" >= $${paramIndex}`;
-            params.push(dateFrom);
-            paramIndex++;
-        }
-        
-        if (dateTo) {
-            query += ` AND sess."startTime" <= $${paramIndex}`;
-            params.push(dateTo);
-            paramIndex++;
-        }
-        
-        if (subjectName) {
-            query += ` AND sess."subjectName" ILIKE $${paramIndex}`;
-            params.push(`%${subjectName}%`);
-            paramIndex++;
-        }
-        
-        query += ` ORDER BY a."joinedAt" DESC`;
-        
-        const result = await pool.query(query, params);
-        
-        // Получаем статистику по группам
-        const statsQuery = `
-            SELECT 
-                COUNT(DISTINCT a."studentId") as "totalStudents",
-                COUNT(DISTINCT a."sessionId") as "totalSessions",
-                COUNT(DISTINCT s."groupId") as "uniqueGroups",
-                COUNT(DISTINCT sess."subjectName") as "uniqueSubjects"
-            FROM "Attendance" a
-            JOIN "Student" s ON a."studentId" = s.id
-            JOIN "Session" sess ON a."sessionId" = sess.id
-            JOIN "Course" c ON sess."courseId" = c.id
-            WHERE c."teacherId" = $1
-        `;
-        
-        const statsResult = await pool.query(statsQuery, [req.params.teacherId]);
-        const stats = statsResult.rows[0];
-        
-        // Получаем посещаемость по группам
-        const attendanceByGroupQuery = `
-            SELECT 
-                g.name as "groupName",
-                COUNT(DISTINCT a."studentId") as "studentsCount",
-                COUNT(DISTINCT a."sessionId") as "sessionsCount"
-            FROM "Attendance" a
-            JOIN "Student" s ON a."studentId" = s.id
-            JOIN "Group" g ON s."groupId" = g.id
-            JOIN "Session" sess ON a."sessionId" = sess.id
-            JOIN "Course" c ON sess."courseId" = c.id
-            WHERE c."teacherId" = $1
-            GROUP BY g.id, g.name
-        `;
-        
-        const groupStatsResult = await pool.query(attendanceByGroupQuery, [req.params.teacherId]);
-        
-        res.json({
-            attendance: result.rows,
-            stats: {
-                totalStudents: parseInt(stats.totalStudents) || 0,
-                totalSessions: parseInt(stats.totalSessions) || 0,
-                uniqueGroups: parseInt(stats.uniqueGroups) || 0,
-                uniqueSubjects: parseInt(stats.uniqueSubjects) || 0,
-                attendanceByGroup: groupStatsResult.rows
-            }
-        });
-    } catch (err) {
-        console.error('Ошибка получения отчёта по посещаемости:', err);
-        res.status(500).json({ error: 'Ошибка сервера', details: err.message });
+  try {
+    const { courseId, sessionId, group, studentName, studentId, dateFrom, dateTo, subjectName } = req.query;
+    const teacherId = parseInt(req.params.teacherId);
+
+    // 1. Получаем все завершённые сессии преподавателя
+    let sessionsQuery = `
+      SELECT 
+        s.id as "sessionId",
+        s."startTime" as "sessionDate",
+        s."subjectName" as "subject",
+        s."groupId",
+        c.id as "courseId",
+        c.title as "courseTitle",
+        g.name as "groupName"
+      FROM "Session" s
+      JOIN "Course" c ON s."courseId" = c.id
+      JOIN "Group" g ON s."groupId" = g.id
+      WHERE c."teacherId" = $1 
+        AND s."isActive" = false 
+        AND s."endTime" IS NOT NULL
+      ORDER BY s."startTime" DESC
+    `;
+
+    let sessionsResult = await pool.query(sessionsQuery, [teacherId]);
+    let allSessions = sessionsResult.rows;
+
+    // Фильтруем сессии
+    if (courseId) allSessions = allSessions.filter(s => s.courseId == courseId);
+    if (sessionId) allSessions = allSessions.filter(s => s.sessionId == sessionId);
+    if (subjectName) allSessions = allSessions.filter(s => s.subject && s.subject.toLowerCase().includes(subjectName.toLowerCase()));
+    if (group) allSessions = allSessions.filter(s => s.groupName && s.groupName.toLowerCase().includes(group.toLowerCase()));
+    if (dateFrom) allSessions = allSessions.filter(s => new Date(s.sessionDate) >= new Date(dateFrom));
+    if (dateTo) allSessions = allSessions.filter(s => new Date(s.sessionDate) <= new Date(dateTo));
+
+    if (allSessions.length === 0) {
+      return res.json({ 
+        attendance: [], 
+        stats: { totalStudents: 0, totalSessions: 0, averageAttendance: 0, uniqueGroups: 0, uniqueSubjects: 0 } 
+      });
     }
+
+    // 2. Получаем всех студентов из групп этих сессий
+    const groupIds = [...new Set(allSessions.map(s => s.groupId).filter(Boolean))];
+
+    if (groupIds.length === 0) {
+      return res.json({ 
+        attendance: [], 
+        stats: { totalStudents: 0, totalSessions: 0, averageAttendance: 0, uniqueGroups: 0, uniqueSubjects: 0 },
+        warning: 'У сессий не заполнен groupId. Создайте новые сессии с указанием группы.'
+      });
+    }
+
+    let studentsResult = await pool.query(
+      `SELECT s.id as "studentId", s."full_name" as "studentName", s."group", s."groupId", g.name as "groupName"
+       FROM "Student" s
+       JOIN "Group" g ON s."groupId" = g.id
+       WHERE s."groupId" = ANY($1::int[])
+       ORDER BY s."full_name"`,
+      [groupIds]
+    );
+    let allStudents = studentsResult.rows;
+
+    if (studentName) allStudents = allStudents.filter(s => s.studentName && s.studentName.toLowerCase().includes(studentName.toLowerCase()));
+    if (studentId) allStudents = allStudents.filter(s => s.studentId == studentId);
+
+    // 3. Получаем все посещения
+    const sessionIds = allSessions.map(s => s.sessionId);
+    const attendanceResult = await pool.query(
+      `SELECT "studentId", "sessionId", "joinedAt" as "joinTime" FROM "Attendance" WHERE "sessionId" = ANY($1::int[])`,
+      [sessionIds]
+    );
+    const attendances = attendanceResult.rows;
+
+    // 4. Получаем отметки об ознакомлении
+    let reviews = [];
+    try {
+      const reviewsResult = await pool.query(
+        `SELECT "studentId", "sessionId", "hasReviewed", "reviewedAt" FROM "MissedSessionReview" WHERE "sessionId" = ANY($1::int[])`,
+        [sessionIds]
+      );
+      reviews = reviewsResult.rows;
+    } catch (err) {
+      // таблица может не существовать
+    }
+
+    // 5. Формируем отчёт - каждый студент × каждая сессия его группы
+    const reportData = [];
+    for (const session of allSessions) {
+      const studentsInGroup = allStudents.filter(s => s.groupId === session.groupId);
+      for (const student of studentsInGroup) {
+        const attendance = attendances.find(a => a.studentId === student.studentId && a.sessionId === session.sessionId);
+        const review = reviews.find(r => r.studentId === student.studentId && r.sessionId === session.sessionId);
+        reportData.push({
+          studentId: student.studentId,
+          studentName: student.studentName,
+          group: student.group,
+          groupName: session.groupName,
+          sessionId: session.sessionId,
+          sessionDate: session.sessionDate,
+          courseTitle: session.courseTitle,
+          subject: session.subject,
+          status: attendance ? 'Присутствовал' : 'Пропустил',
+          joinTime: attendance ? attendance.joinTime : null,
+          hasReviewed: review ? review.hasReviewed : false,
+        });
+      }
+    }
+
+    // 6. Статистика
+    const uniqueStudents = new Set(reportData.map(r => r.studentId));
+    const uniqueSessions = new Set(reportData.map(r => r.sessionId));
+    const uniqueGroups = new Set(reportData.map(r => r.groupName).filter(Boolean));
+    const uniqueSubjects = new Set(reportData.map(r => r.subject).filter(Boolean));
+    const presentCount = reportData.filter(r => r.status === 'Присутствовал').length;
+    const avgAttendance = reportData.length > 0 ? Math.round((presentCount / reportData.length) * 100) : 0;
+
+    res.json({
+      attendance: reportData,
+      stats: {
+        totalStudents: uniqueStudents.size,
+        totalSessions: uniqueSessions.size,
+        averageAttendance: avgAttendance,
+        uniqueGroups: uniqueGroups.size,
+        uniqueSubjects: uniqueSubjects.size,
+      }
+    });
+
+  } catch (err) {
+    console.error('Ошибка получения отчёта:', err);
+    res.status(500).json({ error: 'Ошибка сервера', details: err.message });
+  }
 });
 
 /**
@@ -3725,7 +4346,24 @@ app.get('/api/teacher/:teacherId/attendance/group-stats', async (req, res) => {
 app.get('/api/audio/student/:studentId', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT DISTINCT ar.*, s."startTime" as "sessionDate", c.title as "courseTitle", t.name as "teacherName"
+      `SELECT 
+        ar.*, 
+        s."startTime" as "sessionDate", 
+        c.title as "courseTitle", 
+        t.name as "teacherName",
+        (
+          SELECT COALESCE(json_agg(json_build_object(
+            'id', m.id,
+            'originalName', m."originalName",
+            'filePath', m."filePath",
+            'fileSize', m."fileSize",
+            'fileType', m."fileType",
+            'description', m."description",
+            'createdAt', m."createdAt"
+          )), '[]'::json)
+          FROM "LectureMaterial" m
+          WHERE m."sessionId" = ar."sessionId"
+        ) as materials
        FROM "AudioRecording" ar
        JOIN "Session" s ON ar."sessionId" = s.id
        JOIN "Course" c ON s."courseId" = c.id
@@ -3735,14 +4373,496 @@ app.get('/api/audio/student/:studentId', async (req, res) => {
        ORDER BY ar."createdAt" DESC`,
       [req.params.studentId]
     );
+    
     res.json(result.rows);
   } catch (err) {
-    console.error('Ошибка получения аудиозаписей студента:', err);
+    console.error('Ошибка получения записей студента:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 });
 
+// =============================================================
+// ADMIN ROUTES
+// Вставить в server.js ПЕРЕД строкой app.get('*', ...)
+// Требует: npm install bcrypt
+// =============================================================
 
+const bcrypt = require('bcrypt');
+const SALT_ROUNDS = 10;
+
+// ── Middleware: проверка что запрос от администратора ─────────
+const requireAdmin = async (req, res, next) => {
+  const adminId = req.headers['x-admin-id'];
+  if (!adminId) return res.status(401).json({ error: 'Не авторизован' });
+
+  try {
+    const result = await pool.query('SELECT id FROM "Admin" WHERE id = $1', [adminId]);
+    if (result.rows.length === 0) return res.status(403).json({ error: 'Нет прав администратора' });
+    req.adminId = parseInt(adminId);
+    next();
+  } catch (err) {
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+};
+
+// ── POST /api/admin/login ─────────────────────────────────────
+// Тело: { login, password }
+// Ответ: объект Admin без пароля
+app.post('/api/admin/login', async (req, res) => {
+  const { login, password } = req.body;
+
+  if (!login || !password) {
+    return res.status(400).json({ error: 'Укажите логин и пароль' });
+  }
+
+  try {
+    const result = await pool.query(
+      'SELECT * FROM "Admin" WHERE login = $1',
+      [login]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Неверный логин или пароль' });
+    }
+
+    const admin = result.rows[0];
+    const match = await bcrypt.compare(password, admin.password);
+
+    if (!match) {
+      return res.status(401).json({ error: 'Неверный логин или пароль' });
+    }
+
+    // Не отдаём хэш пароля клиенту
+    const { password: _pwd, ...safeAdmin } = admin;
+    res.json(safeAdmin);
+  } catch (err) {
+    console.error('Ошибка входа администратора:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// ── GET /api/admin/list ───────────────────────────────────────
+// Список всех администраторов
+app.get('/api/admin/list', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, login, name, "createdAt" FROM "Admin" ORDER BY "createdAt" ASC'
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Ошибка получения администраторов:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// ── POST /api/admin/create ────────────────────────────────────
+// Создать нового администратора
+// Тело: { login, password, name }
+app.post('/api/admin/create', requireAdmin, async (req, res) => {
+  const { login, password, name } = req.body;
+
+  if (!login || !password || !name) {
+    return res.status(400).json({ error: 'Заполните все поля: login, password, name' });
+  }
+
+  try {
+    const exists = await pool.query('SELECT id FROM "Admin" WHERE login = $1', [login]);
+    if (exists.rows.length > 0) {
+      return res.status(409).json({ error: 'Администратор с таким логином уже существует' });
+    }
+
+    const hash = await bcrypt.hash(password, SALT_ROUNDS);
+    const result = await pool.query(
+      `INSERT INTO "Admin" (login, password, name, "createdBy")
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, login, name, "createdAt"`,
+      [login, hash, name, req.adminId]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Ошибка создания администратора:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// ── DELETE /api/admin/:adminId ────────────────────────────────
+// Удалить администратора (нельзя удалить себя)
+app.delete('/api/admin/:adminId', requireAdmin, async (req, res) => {
+  const targetId = parseInt(req.params.adminId);
+
+  if (targetId === req.adminId) {
+    return res.status(400).json({ error: 'Нельзя удалить самого себя' });
+  }
+
+  try {
+    const result = await pool.query(
+      'DELETE FROM "Admin" WHERE id = $1 RETURNING id',
+      [targetId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Администратор не найден' });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Ошибка удаления администратора:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// ── GET /api/admin/teachers ───────────────────────────────────
+// Список всех преподавателей с флагом is_admin
+app.get('/api/admin/teachers', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, name, email, is_admin
+       FROM "Teacher"
+       ORDER BY name ASC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Ошибка получения преподавателей:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// ── POST /api/admin/promote ───────────────────────────────────
+// Назначить преподавателя администратором системы
+// Создаёт запись в Admin на основе данных из Teacher
+// Тело: { teacherId }
+app.post('/api/admin/promote', requireAdmin, async (req, res) => {
+  const { teacherId } = req.body;
+
+  if (!teacherId) {
+    return res.status(400).json({ error: 'Укажите teacherId' });
+  }
+
+  try {
+    // Получаем данные преподавателя
+    const teacherResult = await pool.query(
+      'SELECT * FROM "Teacher" WHERE id = $1',
+      [teacherId]
+    );
+
+    if (teacherResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Преподаватель не найден' });
+    }
+
+    const teacher = teacherResult.rows[0];
+
+    // Помечаем преподавателя как admin
+    await pool.query(
+      'UPDATE "Teacher" SET is_admin = TRUE WHERE id = $1',
+      [teacherId]
+    );
+
+    // Создаём запись в Admin если ещё нет (логин = email, временный пароль = email)
+    const loginCandidate = teacher.email;
+    const existingAdmin = await pool.query(
+      'SELECT id FROM "Admin" WHERE login = $1',
+      [loginCandidate]
+    );
+
+    let adminRecord;
+    if (existingAdmin.rows.length === 0) {
+      const tempPassword = teacher.email; // Преподаватель должен сменить пароль
+      const hash = await bcrypt.hash(tempPassword, SALT_ROUNDS);
+      const created = await pool.query(
+        `INSERT INTO "Admin" (login, password, name, "createdBy")
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, login, name`,
+        [loginCandidate, hash, teacher.name, req.adminId]
+      );
+      adminRecord = created.rows[0];
+    } else {
+      adminRecord = existingAdmin.rows[0];
+    }
+
+    res.json({
+      success: true,
+      message: `Преподаватель ${teacher.name} назначен администратором. Логин: ${loginCandidate}, временный пароль: email`,
+      admin: adminRecord
+    });
+  } catch (err) {
+    console.error('Ошибка назначения администратора:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// ── POST /api/admin/demote ────────────────────────────────────
+// Снять права администратора (из таблицы Admin)
+// Тело: { adminId }
+app.post('/api/admin/demote', requireAdmin, async (req, res) => {
+  const { adminId } = req.body;
+
+  if (!adminId) {
+    return res.status(400).json({ error: 'Укажите adminId' });
+  }
+
+  if (parseInt(adminId) === req.adminId) {
+    return res.status(400).json({ error: 'Нельзя снять права с самого себя' });
+  }
+
+  try {
+    // Получаем логин удаляемого администратора
+    const adminResult = await pool.query(
+      'SELECT login FROM "Admin" WHERE id = $1',
+      [adminId]
+    );
+    if (adminResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Администратор не найден' });
+    }
+
+    const adminLogin = adminResult.rows[0].login;
+
+    // Удаляем из Admin
+    await pool.query('DELETE FROM "Admin" WHERE id = $1', [adminId]);
+
+    // Если это был преподаватель — снимаем флаг is_admin
+    await pool.query(
+      'UPDATE "Teacher" SET is_admin = FALSE WHERE email = $1',
+      [adminLogin]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Ошибка снятия прав:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// ── GET /api/admin/model-config ───────────────────────────────
+// Получить текущую конфигурацию модели
+app.get('/api/admin/model-config', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT url, model, temperature FROM "ModelConfig" ORDER BY id DESC LIMIT 1'
+    );
+    if (result.rows.length === 0) {
+      return res.json({ url: 'http://192.168.14.190:1234', model: 'qwen2.5-7b-instruct-1m', temperature: 0.3 });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Ошибка получения конфигурации:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// ── POST /api/admin/model-config ─────────────────────────────
+// Сохранить конфигурацию модели
+// Тело: { url, model, temperature }
+app.post('/api/admin/model-config', requireAdmin, async (req, res) => {
+  const { url, model, temperature } = req.body;
+
+  if (!url || !model || temperature === undefined) {
+    return res.status(400).json({ error: 'Укажите url, model и temperature' });
+  }
+
+  const temp = parseFloat(temperature);
+  if (isNaN(temp) || temp < 0 || temp > 1) {
+    return res.status(400).json({ error: 'temperature должен быть от 0 до 1' });
+  }
+
+  try {
+    // Upsert: обновляем первую строку или вставляем новую
+    const existing = await pool.query('SELECT id FROM "ModelConfig" LIMIT 1');
+
+    if (existing.rows.length > 0) {
+      await pool.query(
+        `UPDATE "ModelConfig"
+         SET url = $1, model = $2, temperature = $3, "updatedAt" = NOW(), "updatedBy" = $4
+         WHERE id = $5`,
+        [url, model, temp, req.adminId, existing.rows[0].id]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO "ModelConfig" (url, model, temperature, "updatedBy")
+         VALUES ($1, $2, $3, $4)`,
+        [url, model, temp, req.adminId]
+      );
+    }
+
+    res.json({ success: true, url, model, temperature: temp });
+  } catch (err) {
+    console.error('Ошибка сохранения конфигурации:', err);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+// ============================================
+// СТРИМИНГОВАЯ ЗАПИСЬ - ЭНДПОИНТЫ
+// ============================================
+
+// ---------- AUDIO STREAMING ----------
+
+app.post('/api/audio/stream/start', async (req, res) => {
+  const { sessionId, teacherId, teacherName } = req.body;
+  
+  if (!sessionId || !teacherId) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+  
+  const streamingId = uuidv4();
+  const session = new StreamingSession(streamingId, 'audio', sessionId, teacherId, teacherName);
+  activeStreamingSessions.set(streamingId, session);
+  
+  res.json({ success: true, streamingId });
+});
+
+app.post('/api/audio/stream/chunk', chunkUpload.single('chunk'), (req, res) => {
+  const { streamingId, chunkIndex } = req.body;
+  
+  if (!streamingId || !req.file) {
+    return res.status(400).json({ error: 'Missing streamingId or chunk data' });
+  }
+  
+  const session = activeStreamingSessions.get(streamingId);
+  if (!session) {
+    return res.status(404).json({ error: 'Streaming session not found' });
+  }
+  
+  session.addChunk(req.file.buffer, parseInt(chunkIndex, 10));
+  res.json({ success: true, chunkIndex: parseInt(chunkIndex, 10) });
+});
+
+app.post('/api/audio/stream/finalize', async (req, res) => {
+  const { streamingId, sessionId, teacherId, title, description, transcription, timedTranscription, timings } = req.body;
+  
+  if (!streamingId) {
+    return res.status(400).json({ error: 'Missing streamingId' });
+  }
+  
+  const session = activeStreamingSessions.get(streamingId);
+  if (!session) {
+    return res.status(404).json({ error: 'Streaming session not found' });
+  }
+  
+  try {
+    const result = await session.finalize({
+      title: title || `Audio recording ${new Date().toLocaleString()}`,
+      description: description || '',
+      transcription: transcription || '',
+      timedTranscription: timedTranscription || '',
+      timings: timings || []
+    });
+    
+    const dbResult = await pool.query(
+      `INSERT INTO "AudioRecording" 
+       ("sessionId", "teacherId", "fileName", "filePath", "duration", "title", "description", "transcription", "timedTranscription", "type", "createdAt") 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) 
+       RETURNING *`,
+      [sessionId || session.sessionId, teacherId || session.teacherId, `${result.id}.webm`, 
+       result.filePath, result.duration, result.title, result.description || '',
+       transcription || '', timedTranscription || '', 'audio']
+    );
+    
+    if (sessionId && io) {
+      io.to(`session_${sessionId}`).emit('audio_recording_added', {
+        recording: dbResult.rows[0],
+        timestamp: new Date()
+      });
+    }
+    
+    activeStreamingSessions.delete(streamingId);
+    res.json({ success: true, recording: dbResult.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/audio/stream/cancel', (req, res) => {
+  const { streamingId } = req.body;
+  const session = activeStreamingSessions.get(streamingId);
+  if (session) {
+    session.cancel();
+    activeStreamingSessions.delete(streamingId);
+  }
+  res.json({ success: true });
+});
+
+// ---------- VIDEO STREAMING ----------
+
+app.post('/api/video/stream/start', async (req, res) => {
+  const { sessionId, teacherId, teacherName } = req.body;
+  
+  if (!sessionId || !teacherId) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+  
+  const streamingId = uuidv4();
+  const session = new StreamingSession(streamingId, 'video', sessionId, teacherId, teacherName);
+  activeStreamingSessions.set(streamingId, session);
+  
+  res.json({ success: true, streamingId });
+});
+
+app.post('/api/video/stream/chunk', chunkUpload.single('chunk'), (req, res) => {
+  const { streamingId, chunkIndex } = req.body;
+  
+  if (!streamingId || !req.file) {
+    return res.status(400).json({ error: 'Missing streamingId or chunk data' });
+  }
+  
+  const session = activeStreamingSessions.get(streamingId);
+  if (!session) {
+    return res.status(404).json({ error: 'Streaming session not found' });
+  }
+  
+  session.addChunk(req.file.buffer, parseInt(chunkIndex, 10));
+  res.json({ success: true });
+});
+
+app.post('/api/video/stream/finalize', async (req, res) => {
+  const { streamingId, sessionId, teacherId, title, description } = req.body;
+  
+  if (!streamingId) {
+    return res.status(400).json({ error: 'Missing streamingId' });
+  }
+  
+  const session = activeStreamingSessions.get(streamingId);
+  if (!session) {
+    return res.status(404).json({ error: 'Streaming session not found' });
+  }
+  
+  try {
+    const result = await session.finalize({
+      title: title || `Video recording ${new Date().toLocaleString()}`,
+      description: description || ''
+    });
+    
+    const dbResult = await pool.query(
+      `INSERT INTO "AudioRecording" 
+       ("sessionId", "teacherId", "fileName", "filePath", "duration", "title", "description", "type", "createdAt") 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) 
+       RETURNING *`,
+      [sessionId || session.sessionId, teacherId || session.teacherId, `${result.id}.webm`,
+       result.filePath, result.duration, result.title, result.description || '', 'video']
+    );
+    
+    if (sessionId && io) {
+      io.to(`session_${sessionId}`).emit('video_recording_added', {
+        recording: dbResult.rows[0],
+        timestamp: new Date()
+      });
+    }
+    
+    activeStreamingSessions.delete(streamingId);
+    res.json({ success: true, recording: dbResult.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/video/stream/cancel', (req, res) => {
+  const { streamingId } = req.body;
+  const session = activeStreamingSessions.get(streamingId);
+  if (session) {
+    session.cancel();
+    activeStreamingSessions.delete(streamingId);
+  }
+  res.json({ success: true });
+});
+// =============================================================
+// КОНЕЦ ADMIN ROUTES
+// =============================================================
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

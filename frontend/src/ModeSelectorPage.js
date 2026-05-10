@@ -4,10 +4,10 @@ const DEFAULT_PORT = '3002';
 
 const ModeSelectorPage = ({ onContinue }) => {
   const [localIPs, setLocalIPs] = useState([]);
-  const [selectedIP, setSelectedIP] = useState('');
+  const [ipAddress, setIpAddress] = useState('');
   const [isLoadingIPs, setIsLoadingIPs] = useState(true);
   const [error, setError] = useState('');
-  const [manualIP, setManualIP] = useState('');
+  const [showDropdown, setShowDropdown] = useState(false);
 
   // Получение всех IP-адресов компьютера
   useEffect(() => {
@@ -20,11 +20,9 @@ const ModeSelectorPage = ({ onContinue }) => {
           // Восстанавливаем сохранённый IP, если он есть в списке
           const savedIP = sessionStorage.getItem('selectedLocalIP');
           if (savedIP && ips.includes(savedIP)) {
-            setSelectedIP(savedIP);
-            setManualIP(savedIP);
+            setIpAddress(savedIP);
           } else if (ips[0]) {
-            setSelectedIP(ips[0]);
-            setManualIP(ips[0]);
+            setIpAddress(ips[0]);
           }
         } else {
           setError('Не удалось автоматически определить IP-адреса. Введите IP вручную.');
@@ -71,7 +69,7 @@ const ModeSelectorPage = ({ onContinue }) => {
           if (!uniqueIPs.has(ip) && 
               !ip.startsWith('0.') && 
               !ip.startsWith('127.') && 
-              !ip.startsWith('169.254.') && // APIPA
+              !ip.startsWith('169.254.') &&
               !ip.startsWith('255.') &&
               ip !== '0.0.0.0' &&
               (ip.startsWith('10.') || 
@@ -109,10 +107,10 @@ const ModeSelectorPage = ({ onContinue }) => {
   };
 
   const handleLocal = () => {
-    const ipToUse = manualIP.trim() || selectedIP;
+    const ipToUse = ipAddress.trim();
     
     if (!ipToUse) {
-      setError('Пожалуйста, выберите или введите IP-адрес');
+      setError('Пожалуйста, введите IP-адрес');
       return;
     }
     
@@ -133,17 +131,15 @@ const ModeSelectorPage = ({ onContinue }) => {
     if (onContinue) onContinue();
   };
 
-  const handleSelectChange = (e) => {
-    const value = e.target.value;
-    setSelectedIP(value);
-    setManualIP(value);
+  const handleIpChange = (e) => {
+    setIpAddress(e.target.value);
     setError('');
+    setShowDropdown(false);
   };
 
-  const handleManualIPChange = (e) => {
-    const value = e.target.value;
-    setManualIP(value);
-    setSelectedIP('');
+  const selectIpFromList = (ip) => {
+    setIpAddress(ip);
+    setShowDropdown(false);
     setError('');
   };
 
@@ -177,7 +173,7 @@ const ModeSelectorPage = ({ onContinue }) => {
 
         <div
           style={{
-            width: '100%',
+            width: '100',
             padding: '20px 24px',
             marginBottom: '24px',
             background: '#fff',
@@ -193,19 +189,20 @@ const ModeSelectorPage = ({ onContinue }) => {
               background: '#dbeafe', display: 'flex', alignItems: 'center',
               justifyContent: 'center', fontSize: '24px', flexShrink: 0
             }}>
+              
             </div>
             <div>
               <div style={{ fontSize: '16px', fontWeight: '600', color: '#111827', marginBottom: '4px' }}>
                 Локальная сеть (аудитория)
               </div>
               <div style={{ fontSize: '13px', color: '#6B7280', lineHeight: '1.4' }}>
-                Вы в университете и подключены к Wi-Fi вуза
+                Вы подключены к локальной сети университета (Wi-Fi или провод)
               </div>
             </div>
           </div>
           
-          {/* Выпадающий список IP-адресов */}
-          <div>
+          {/* Поле ввода IP с выпадающим списком */}
+          <div style={{ position: 'relative' }}>
             <label style={{ 
               fontSize: '12px', 
               color: '#4B5563', 
@@ -229,52 +226,70 @@ const ModeSelectorPage = ({ onContinue }) => {
               </div>
             ) : (
               <>
-                {localIPs.length > 0 && (
-                  <select
-                    value={selectedIP}
-                    onChange={handleSelectChange}
+                <div style={{ position: 'relative' }}>
+                  <input
+                    type="text"
+                    placeholder="Введите IP-адрес сервера"
+                    value={ipAddress}
+                    onChange={handleIpChange}
+                    onFocus={() => localIPs.length > 0 && setShowDropdown(true)}
+                    onBlur={() => setTimeout(() => setShowDropdown(false), 200)}
                     style={{
                       width: '100%',
                       padding: '10px 12px',
                       fontSize: '14px',
                       border: '1px solid #D1D5DB',
                       borderRadius: '10px',
-                      background: '#FFFFFF',
-                      cursor: 'pointer',
                       outline: 'none',
-                      marginBottom: '10px',
+                      boxSizing: 'border-box',
                       transition: 'border-color 0.2s'
                     }}
                     onFocus={(e) => e.target.style.borderColor = '#2563EB'}
                     onBlur={(e) => e.target.style.borderColor = '#D1D5DB'}
-                  >
-                    <option value="">-- Выберите из списка --</option>
-                    {localIPs.map((ip, idx) => (
-                      <option key={idx} value={ip}>
-                        {ip}
-                      </option>
-                    ))}
-                  </select>
-                )}
+                  />
+                  
+                  {/* Выпадающий список с найденными IP */}
+                  {showDropdown && localIPs.length > 0 && (
+                    <div style={{
+                      position: 'absolute',
+                      top: '100%',
+                      left: 0,
+                      right: 0,
+                      background: '#fff',
+                      border: '1px solid #E5E7EB',
+                      borderRadius: '10px',
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+                      marginTop: '4px',
+                      zIndex: 10,
+                      maxHeight: '200px',
+                      overflowY: 'auto'
+                    }}>
+                      {localIPs.map((ip, idx) => (
+                        <div
+                          key={idx}
+                          onClick={() => selectIpFromList(ip)}
+                          style={{
+                            padding: '10px 12px',
+                            fontSize: '14px',
+                            cursor: 'pointer',
+                            borderBottom: idx < localIPs.length - 1 ? '1px solid #F3F4F6' : 'none',
+                            transition: 'background 0.2s'
+                          }}
+                          onMouseEnter={(e) => e.currentTarget.style.background = '#F9FAFB'}
+                          onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                        >
+                          {ip}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 
-                <input
-                  type="text"
-                  placeholder={localIPs.length > 0 ? "Или введите IP вручную" : "Введите IP-адрес сервера"}
-                  value={manualIP}
-                  onChange={handleManualIPChange}
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    fontSize: '14px',
-                    border: '1px solid #D1D5DB',
-                    borderRadius: '10px',
-                    outline: 'none',
-                    boxSizing: 'border-box',
-                    transition: 'border-color 0.2s'
-                  }}
-                  onFocus={(e) => e.target.style.borderColor = '#2563EB'}
-                  onBlur={(e) => e.target.style.borderColor = '#D1D5DB'}
-                />
+                {localIPs.length > 0 && (
+                  <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: '6px' }}>
+                    Нажмите на поле для выбора из найденных IP
+                  </div>
+                )}
               </>
             )}
             
@@ -318,7 +333,7 @@ const ModeSelectorPage = ({ onContinue }) => {
               borderTop: '1px solid #F3F4F6',
               paddingTop: '10px'
             }}>
-               Будет открыто: <strong>https://{manualIP || 'IP'}:{DEFAULT_PORT}</strong>
+               Будет открыто: <strong>https://{ipAddress || 'IP'}:{DEFAULT_PORT}</strong>
             </div>
           </div>
         </div>
