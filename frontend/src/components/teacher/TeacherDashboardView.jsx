@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import ActiveWebinarsTab from './tabs/ActiveWebinarsTab';
 import CreateWebinarTab from './tabs/CreateWebinarTab';
@@ -6,8 +5,6 @@ import GroupsSubjectsTab from './tabs/GroupsSubjectsTab';
 import CalendarTab from './tabs/CalendarTab';
 import ReportsTab from './tabs/ReportsTab';
 import RecordingsTab from './tabs/RecordingsTab';
-import ProfileTab from './tabs/ProfileTab';
-
 
 const TeacherDashboardView = ({
   teacher,
@@ -22,16 +19,15 @@ const TeacherDashboardView = ({
   setNewCourseTitle,
   selectedCourse,
   setSelectedCourse,
-  selectedGroup,
-  setSelectedGroup,
-  selectedSubject,
-  setSelectedSubject,
+  selectedGroups,
+  setSelectedGroups,
   sessionDescription,
   setSessionDescription,
   error,
   setError,
   loading,
   recordingsLoading,
+  completedSessionsCount,
   handleCreateCourse,
   handleCreateSession,
   handleScheduleSession,
@@ -68,6 +64,8 @@ const TeacherDashboardView = ({
           padding: 20px 40px;
           background-color: #fff;
           border-bottom: 1px solid #e5e7eb;
+          flex-wrap: wrap;
+          gap: 16px;
         }
 
         .logo-section {
@@ -76,15 +74,22 @@ const TeacherDashboardView = ({
           gap: 12px;
         }
 
+        .logo {
+          width: 48px;
+          height: 48px;
+          background-color: #7B61FF;
+          border-radius: 12px;
+        }
+
         .title {
-          font-size: 24px;
+          font-size: 18px;
           font-weight: 700;
           color: #000;
         }
 
         .teacher-info {
           color: #6B7280;
-          font-size: 14px;
+          font-size: 24px;
           margin: 0;
         }
 
@@ -117,6 +122,7 @@ const TeacherDashboardView = ({
           border-radius: 16px;
           box-shadow: 0 1px 3px rgba(0,0,0,0.05);
           border: 1px solid #e5e7eb;
+          flex-wrap: wrap;
         }
 
         .tab-button {
@@ -171,11 +177,12 @@ const TeacherDashboardView = ({
 
       <div className="header">
         <div className="logo-section">
+          <div className="logo"></div>
           <span className="title">ВебРум</span>
         </div>
         <div>
           <p className="teacher-info">
-            <strong>{teacher?.name || 'Преподаватель'}</strong> (ID: {teacher?.id})
+            <strong>{teacher?.name || 'Преподаватель'}</strong> 
           </p>
         </div>
         <button onClick={onLogout} className="back-button">
@@ -220,12 +227,6 @@ const TeacherDashboardView = ({
         >
           Записи лекций
         </button>
-        <button
-          onClick={() => setActiveTab('profile')}
-          className={`tab-button ${activeTab === 'profile' ? 'active' : ''}`}
-        >
-          Личная информация
-        </button>
       </div>
 
       <div className="main-content">
@@ -236,6 +237,8 @@ const TeacherDashboardView = ({
             onFinishSession={handleFinishSession}
             loadSessions={loadSessions}
             loading={loading}
+            scheduledSessions={scheduledSessions}
+            completedSessionsCount={completedSessionsCount}
           />
         )}
 
@@ -248,10 +251,8 @@ const TeacherDashboardView = ({
             setNewCourseTitle={setNewCourseTitle}
             selectedCourse={selectedCourse}
             setSelectedCourse={setSelectedCourse}
-            selectedGroup={selectedGroup}
-            setSelectedGroup={setSelectedGroup}
-            selectedSubject={selectedSubject}
-            setSelectedSubject={setSelectedSubject}
+            selectedGroups={selectedGroups}
+            setSelectedGroups={setSelectedGroups}
             sessionDescription={sessionDescription}
             setSessionDescription={setSessionDescription}
             error={error}
@@ -296,11 +297,8 @@ const TeacherDashboardView = ({
             onTranscribe={onTranscribeRecording}
             onEnhanceText={onEnhanceText}
             onUpdateField={onUpdateRecordingField}
+            teacherId={teacher?.id}
           />
-        )}
-
-        {activeTab === 'profile' && (
-          <ProfileTab teacher={teacher} />
         )}
       </div>
 

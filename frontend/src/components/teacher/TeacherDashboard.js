@@ -1,10 +1,9 @@
-
 import React, { useState, useEffect } from 'react';
 import TeacherDashboardView from './TeacherDashboardView';
 
 const API_BASE_URL = window.location.hostname.includes('tunnel4.com')
-  ? 'https://4d46289f-50f4-4151-9e9f-4860ddd78a36.tunnel4.com'
-  : 'https://10.121.104.190:3002';
+  ? ''
+  : 'https://192.168.0.20:3002';
 
 const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
   const [courses, setCourses] = useState([]);
@@ -14,12 +13,24 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
   const [recordings, setRecordings] = useState([]);
   const [newCourseTitle, setNewCourseTitle] = useState('');
   const [selectedCourse, setSelectedCourse] = useState('');
-  const [selectedGroup, setSelectedGroup] = useState('');
-  const [selectedSubject, setSelectedSubject] = useState('');
+  const [selectedGroups, setSelectedGroups] = useState([]); // МАССИВ для нескольких групп
   const [sessionDescription, setSessionDescription] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [recordingsLoading, setRecordingsLoading] = useState(false);
+  const [completedSessionsCount, setCompletedSessionsCount] = useState(0);
+
+  const loadCompletedSessionsCount = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/teacher/${teacher.id}/sessions/completed/count`);
+      if (response.ok) {
+        const data = await response.json();
+        setCompletedSessionsCount(data.count);
+      }
+    } catch (err) {
+      console.error('Ошибка загрузки статистики:', err);
+    }
+  };
 
   const loadTeacherGroups = async () => {
     try {
@@ -37,12 +48,12 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
   const loadCourses = async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/teacher/${teacher.id}/courses`);
-      if (!response.ok) throw new Error('Ошибка загрузки курсов');
+      if (!response.ok) throw new Error('Ошибка загрузки предметов');
       const data = await response.json();
       setCourses(data);
     } catch (err) {
-      console.error('Ошибка загрузки курсов:', err);
-      setError('Ошибка загрузки курсов');
+      console.error('Ошибка загрузки предметов:', err);
+      setError('Ошибка загрузки предметов');
     }
   };
 
@@ -87,7 +98,7 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
 
   const handleCreateCourse = async () => {
     if (!newCourseTitle.trim()) {
-      setError('Введите название курса');
+      setError('Введите название предмета');
       return;
     }
     
@@ -102,40 +113,41 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
         })
       });
       
-      if (!response.ok) throw new Error('Ошибка создания курса');
+      if (!response.ok) throw new Error('Ошибка создания предмета');
       
       const data = await response.json();
       setCourses([...courses, data]);
       setNewCourseTitle('');
       alert('Курс успешно создан');
     } catch (err) {
-      console.error('Ошибка создания курса:', err);
-      setError('Ошибка создания курса');
+      console.error('Ошибка создания предмета:', err);
+      setError('Ошибка создания предмета');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleCreateSession = async () => {
+  const handleCreateSession = async (selectedGroupsArray, subjectName) => {
+    // Проверяем выбранные группы
     if (!selectedCourse) {
-      setError('Выберите курс для создания сессии');
+      setError('Выберите предмет для создания сессии');
       return;
     }
     
-    if (!selectedGroup) {
-      setError('Выберите группу для сессии');
-      return;
-    }
-    
-    if (!selectedSubject) {
-      setError('Выберите предмет для сессии');
+    if (!selectedGroupsArray || selectedGroupsArray.length === 0) {
+      setError('Выберите хотя бы одну группу для сессии');
       return;
     }
     
     try {
       setLoading(true);
       
-      const selectedGroupObj = teacherGroups.find(g => g.groupId === parseInt(selectedGroup));
+      // subjectName берём из параметра или из выбранного курса
+      let finalSubjectName = subjectName;
+      if (!finalSubjectName) {
+        const selectedCourseObj = courses.find(c => c.id === parseInt(selectedCourse));
+        finalSubjectName = selectedCourseObj ? selectedCourseObj.title : '';
+      }
       
       const response = await fetch(`${API_BASE_URL}/api/teacher/sessions/create`, {
         method: 'POST',
@@ -143,8 +155,8 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
         body: JSON.stringify({ 
           courseId: selectedCourse,
           description: sessionDescription.trim() || null,
-          groupId: parseInt(selectedGroup),
-          subjectName: selectedSubject
+          groupIds: selectedGroupsArray.map(id => parseInt(id)), // МАССИВ групп
+          subjectName: finalSubjectName
         })
       });
       
@@ -153,13 +165,15 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
       const data = await response.json();
       await loadSessions();
       
-      const groupName = selectedGroupObj ? selectedGroupObj.groupName : selectedGroup;
+      // Получаем названия групп для сообщения
+      const selectedGroupNames = selectedGroupsArray.map(gid => 
+        teacherGroups.find(g => g.groupId === gid)?.groupName
+      ).filter(Boolean);
       
-      alert(`Сессия вебинара создана!\nГруппа: ${groupName}\nПредмет: ${selectedSubject}\nID сессии: ${data.id}`);
+      alert(`Сессия вебинара создана!\nГруппы: ${selectedGroupNames.join(', ')}\nПредмет: ${finalSubjectName}`);
       
       setSelectedCourse('');
-      setSelectedGroup('');
-      setSelectedSubject('');
+      setSelectedGroups([]); // Очищаем массив групп
       setSessionDescription('');
     } catch (err) {
       console.error('Ошибка создания сессии:', err);
@@ -177,7 +191,8 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...sessionData,
-          teacherId: teacher.id
+          teacherId: teacher.id,
+          groupIds: sessionData.groupIds // Передаем массив групп
         })
       });
       
@@ -216,6 +231,7 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
       if (!response.ok) throw new Error('Ошибка завершения сессии');
       
       await loadSessions();
+      await loadCompletedSessionsCount();
       alert('Сессия завершена');
     } catch (err) {
       console.error('Ошибка завершения сессии:', err);
@@ -324,6 +340,7 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
     console.log('Редактирование записи:', recording);
   };
 
+  // Автоматический запуск запланированных сессий
   useEffect(() => {
     const checkScheduledSessions = () => {
       const now = new Date();
@@ -365,6 +382,7 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
     return () => clearInterval(interval);
   }, [scheduledSessions]);
 
+  // Загрузка всех данных при монтировании
   useEffect(() => {
     const loadAllData = async () => {
       setLoading(true);
@@ -374,7 +392,8 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
           loadSessions(),
           loadScheduledSessions(),
           loadTeacherGroups(),
-          loadRecordings()
+          loadRecordings(),
+          loadCompletedSessionsCount()
         ]);
       } catch (err) {
         console.error('Ошибка загрузки данных:', err);
@@ -386,6 +405,7 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
     
     loadAllData();
     
+    // Интервалы для обновления
     const sessionsInterval = setInterval(loadSessions, 30000);
     const scheduledInterval = setInterval(loadScheduledSessions, 60000);
     
@@ -409,16 +429,15 @@ const TeacherDashboard = ({ teacher, onLogout, onEnterWebinar }) => {
       setNewCourseTitle={setNewCourseTitle}
       selectedCourse={selectedCourse}
       setSelectedCourse={setSelectedCourse}
-      selectedGroup={selectedGroup}
-      setSelectedGroup={setSelectedGroup}
-      selectedSubject={selectedSubject}
-      setSelectedSubject={setSelectedSubject}
+      selectedGroups={selectedGroups}        // НОВОЕ - массив групп
+      setSelectedGroups={setSelectedGroups}  // НОВОЕ
       sessionDescription={sessionDescription}
       setSessionDescription={setSessionDescription}
       error={error}
       setError={setError}
       loading={loading}
       recordingsLoading={recordingsLoading}
+      completedSessionsCount={completedSessionsCount}
       handleCreateCourse={handleCreateCourse}
       handleCreateSession={handleCreateSession}
       handleScheduleSession={handleScheduleSession}

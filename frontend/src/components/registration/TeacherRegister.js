@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 
 const API_BASE_URL = window.location.hostname.includes('tunnel4.com')
-  ? 'https://4d46289f-50f4-4151-9e9f-4860ddd78a36.tunnel4.com'
-  : 'https://10.78.167.190:3002';
+  ? ''
+  : 'https://192.168.0.20:3002';
 
 const SOCKET_URL = API_BASE_URL;
 
 
-const TeacherRegister = ({ setTeacher, onBack }) => {
+const TeacherRegister = ({ setTeacher, onBack, university }) => {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [consent, setConsent] = useState(false);
@@ -33,7 +33,7 @@ const TeacherRegister = ({ setTeacher, onBack }) => {
       const response = await fetch(`${API_BASE_URL}/api/teacher/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, consent })
+        body: JSON.stringify({ name, email, consent, universityId: university?.id || null })
       });
 
       const data = await response.json();
@@ -63,6 +63,7 @@ const TeacherRegister = ({ setTeacher, onBack }) => {
       {/* Header */}
       <div className="header">
         <div className="logo-section">
+          <div className="logo"></div>
           <span className="title">ВебРум</span>
         </div>
         <button onClick={onBack} className="back-button">
@@ -80,6 +81,21 @@ const TeacherRegister = ({ setTeacher, onBack }) => {
               <span className="badge-role">Преподаватель</span>
             </div>
           </div>
+
+          {university && (
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: '8px',
+              background: '#ede9ff', color: '#5b3fd4', padding: '8px 16px',
+              borderRadius: '50px', fontSize: '13px', fontWeight: '500',
+              marginBottom: '32px', width: 'fit-content'
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7B61FF" strokeWidth="2">
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                <polyline points="9 22 9 12 15 12 15 22"></polyline>
+              </svg>
+              {university.short_name || university.name}
+            </div>
+          )}
           
           <h1 className="welcome-title">Добро пожаловать!</h1>
           <p className="welcome-text">
@@ -188,6 +204,12 @@ const TeacherRegister = ({ setTeacher, onBack }) => {
           display: flex;
           align-items: center;
           gap: 12px;
+        }
+        .logo {
+          width: 48px;
+          height: 48px;
+          background-color: #7B61FF;
+          border-radius: 12px;
         }
         .title {
           font-size: 24px;

@@ -322,7 +322,7 @@ const ModeSelectorPage = ({ onContinue }) => {
               onMouseEnter={(e) => e.currentTarget.style.background = '#1D4ED8'}
               onMouseLeave={(e) => e.currentTarget.style.background = '#2563EB'}
             >
-              Подключиться к локальному серверу
+              Подключиться
             </button>
             
             <div style={{ 

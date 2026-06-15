@@ -3,21 +3,14 @@ import ModeSelectorPage from './ModeSelectorPage';
 import HomePage from './pages/HomePage';
 import TeacherPage from './pages/TeacherPage';
 import StudentPage from './pages/StudentPage';
-import TeacherRegister from './components/registration/TeacherRegister';
-import StudentRegister from './components/registration/StudentRegister';
 import AdminLogin from './components/admin/AdminLogin';
 import AdminPage from './pages/AdminPage';
 
 function App() {
   const [userRole, setUserRole] = useState(null);
-  const [showRegistration, setShowRegistration] = useState(false);
-  const [registrationRole, setRegistrationRole] = useState(null);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [admin, setAdmin] = useState(null);
 
-  // Показываем экран выбора режима только если:
-  // 1. Зашли через тоннель
-  // 2. Ещё не выбрали режим (нет отметки в sessionStorage)
   const isTunnel = window.location.hostname.includes('tunnel4.com');
   const modeChosen = sessionStorage.getItem('modeChosen') === 'true';
 
@@ -45,88 +38,51 @@ function App() {
     return <AdminPage admin={admin} onBack={() => setAdmin(null)} />;
   }
 
-  const handleRegister = (role) => {
-    setRegistrationRole(role);
-    setShowRegistration(true);
-  };
-
-  const handleBack = () => {
-    setShowRegistration(false);
-    setRegistrationRole(null);
-  };
-
-  const handleSetTeacher = (teacher) => {
-    console.log('Teacher registered:', teacher);
-    setUserRole('teacher');
-    setShowRegistration(false);
-  };
-
-  const handleSetStudent = (student) => {
-    console.log('Student registered:', student);
-    setUserRole('student');
-    setShowRegistration(false);
-  };
-
-  if (showRegistration) {
-    if (registrationRole === 'teacher') {
-      return <TeacherRegister setTeacher={handleSetTeacher} onBack={handleBack} />;
-    } else {
-      return <StudentRegister setStudent={handleSetStudent} onBack={handleBack} />;
-    }
-  }
-
+  // Teacher flow — выбор вуза встроен внутрь TeacherPage
   if (userRole === 'teacher') {
     return <TeacherPage onBack={() => setUserRole(null)} />;
   }
 
+  // Student flow — выбор вуза встроен внутрь StudentPage
   if (userRole === 'student') {
     return <StudentPage onBack={() => setUserRole(null)} />;
   }
 
-  // Inject admin button into HomePage via wrapper
   return (
     <div style={{ position: 'relative' }}>
-      <HomePage setUserRole={setUserRole} onRegister={handleRegister} />
-      {/* Hidden admin entry — top-right corner */}
+      <HomePage setUserRole={setUserRole} />
       <AdminGhostButton onClick={() => setShowAdminLogin(true)} />
     </div>
   );
 }
 
-/** Invisible admin button that reveals on hover */
-const AdminGhostButton = ({ onClick }) => {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      title="Вход для администратора"
-      style={{
-        position: 'fixed',
-        top: '16px',
-        right: '16px',
-        zIndex: 1000,
-        padding: '7px 14px',
-        border: '1px solid',
-        borderRadius: '8px',
-        fontSize: '12px',
-        fontWeight: '500',
-        cursor: 'pointer',
-        transition: 'all 0.25s ease',
-        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-        // ghost by default, visible on hover
-        background: hovered ? '#111827' : 'transparent',
-        color: hovered ? '#fff' : 'transparent',
-        borderColor: hovered ? '#111827' : 'transparent',
-        boxShadow: hovered ? '0 2px 8px rgba(0,0,0,0.15)' : 'none',
-        userSelect: 'none',
-      }}
-    >
-      Администратор
-    </button>
-  );
-};
+const AdminGhostButton = ({ onClick }) => (
+  <button
+    onClick={onClick}
+    title="Вход для администратора"
+    style={{
+      position: 'fixed',
+      bottom: '24px',
+      right: '24px',
+      zIndex: 1000,
+      padding: '7px 16px',
+      border: 'none',
+      borderRadius: '10px',
+      fontSize: '12px',
+      fontWeight: '500',
+      cursor: 'pointer',
+      transition: 'background 0.2s, box-shadow 0.2s',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      background: '#7B61FF',
+      color: '#fff',
+      boxShadow: '0 2px 8px rgba(123,97,255,0.25)',
+      userSelect: 'none',
+    }}
+    onMouseEnter={(e) => { e.currentTarget.style.background = '#6750E0'; }}
+    onMouseLeave={(e) => { e.currentTarget.style.background = '#7B61FF'; }}
+  >
+    Администратор
+  </button>
+);
 
 export default App;

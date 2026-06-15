@@ -13,7 +13,7 @@ const ScheduleSessionModal = ({ isOpen, onClose, courses, onSchedule }) => {
   const validateForm = () => {
     const newErrors = {};
     
-    if (!selectedCourse) newErrors.course = 'Выберите курс';
+    if (!selectedCourse) newErrors.course = 'Выберите предмет';
     if (!title.trim()) newErrors.title = 'Введите название сессии';
     if (!scheduledDate) newErrors.date = 'Выберите дату';
     if (!scheduledTime) newErrors.time = 'Выберите время';
@@ -191,7 +191,7 @@ const ScheduleSessionModal = ({ isOpen, onClose, courses, onSchedule }) => {
               onChange={(e) => setSelectedCourse(e.target.value)}
               style={styles.select}
             >
-              <option value="">Выберите курс</option>
+              <option value="">Выберите предмет</option>
               {courses.map(course => (
                 <option key={course.id} value={course.id}>
                   {course.title}

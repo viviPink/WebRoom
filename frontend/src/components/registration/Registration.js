@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import RegistrationView from './RegistrationView';
 
 const API_BASE_URL = window.location.hostname.includes('tunnel4.com')
-  ? 'https://4d46289f-50f4-4151-9e9f-4860ddd78a36.tunnel4.com'
-  : 'https://10.78.167.190:3002';
+  ? ''
+  : 'https://192.168.0.20:3002';
 
 const SOCKET_URL = API_BASE_URL;
 

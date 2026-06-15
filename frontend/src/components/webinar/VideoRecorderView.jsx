@@ -117,7 +117,7 @@ const VideoRecorderView = ({
             onMouseEnter={e => e.currentTarget.style.backgroundColor = '#DC2626'}
             onMouseLeave={e => e.currentTarget.style.backgroundColor = '#EF4444'}
           >
-            <span style={{ fontSize: '10px' }}>●</span>
+            <span style={{ fontSize: '10px' }}></span>
             Начать запись
           </button>
         ) : (

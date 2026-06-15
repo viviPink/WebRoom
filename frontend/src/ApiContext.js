@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState } from 'react';
 
-export const LOCAL_URL = 'http://192.168.14.190:3001';
-export const INTERNET_URL = 'https://4d46289f-50f4-4151-9e9f-4860ddd78a36.tunnel4.com';
+export const LOCAL_URL = 'http://192.168.0.20:3001';
+export const INTERNET_URL = 'https://dcaed71a-ca28-4e9a-a1a7-59444c3cf311.tunnel4.com';
 
 const ApiContext = createContext(null);
 

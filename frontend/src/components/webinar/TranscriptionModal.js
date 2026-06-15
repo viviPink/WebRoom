@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 
 const API_BASE_URL = window.location.hostname.includes('tunnel4.com')
-  ? 'https://4d46289f-50f4-4151-9e9f-4860ddd78a36.tunnel4.com'
-  : 'https://192.168.14.190:3002';
+  ? ''
+  : 'https://192.168.0.20:3002';
 
 const SOCKET_URL = API_BASE_URL;
 
@@ -538,7 +538,7 @@ const TranscriptionModal = ({ recordingId, onClose, onSave }) => {
           <div>
             <h2 style={{ margin: 0, fontSize: '22px'}}>Редактор конспекта</h2>
             <div style={{ fontSize: '14px', opacity: 0.8 }}>
-              {recordingInfo?.title || 'Без названия'} (ID: {recordingId})
+              {recordingInfo?.title || 'Без названия'} ()
             </div>
           </div>
           

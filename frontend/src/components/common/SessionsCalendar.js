@@ -408,7 +408,7 @@ const SessionsCalendar = ({
                   style={styles.editButton}
                   title="Редактировать"
                 >
-                  редактир
+                   
                 </button>
                 <button
                   onClick={(e) => {
@@ -418,7 +418,7 @@ const SessionsCalendar = ({
                   style={styles.deleteButton}
                   title="Удалить"
                 >
-                  удал
+                  🗑️
                 </button>
               </div>
             </div>

@@ -15,6 +15,7 @@ const AdminLoginView = ({
       {/* Header */}
       <div className="header">
         <div className="logo-section">
+          <div className="logo"></div>
           <span className="title">ВебРум</span>
         </div>
         <button onClick={onBack} className="back-button">
@@ -40,15 +41,15 @@ const AdminLoginView = ({
 
           <div className="admin-features">
             <div className="feature-item">
-              <span className="feature-icon">👥</span>
+              <span className="feature-icon">USR</span>
               <span>Управление пользователями</span>
             </div>
             <div className="feature-item">
-              <span className="feature-icon">🤖</span>
+              <span className="feature-icon">AI</span>
               <span>Настройка AI-моделей</span>
             </div>
             <div className="feature-item">
-              <span className="feature-icon">🛡️</span>
+              <span className="feature-icon">SEC</span>
               <span>Назначение ролей и прав</span>
             </div>
           </div>
@@ -130,6 +131,12 @@ const AdminLoginView = ({
           display: flex;
           align-items: center;
           gap: 12px;
+        }
+        .logo {
+          width: 48px;
+          height: 48px;
+          background-color: #7B61FF;
+          border-radius: 12px;
         }
         .title {
           font-size: 24px;

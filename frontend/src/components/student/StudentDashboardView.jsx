@@ -1,6 +1,9 @@
-
 import React, { useState, useMemo } from 'react';
 import StudentVideoPlayer from '../StudentVideoPlayer';
+
+const API_BASE_URL = window.location.hostname.includes('tunnel4.com')
+  ? ''
+  : 'https://192.168.0.20:3002';
 
 const StudentDashboardView = ({
   student,
@@ -17,6 +20,7 @@ const StudentDashboardView = ({
   missedSessions,
   loadingMissed,
   downloadRecording,
+  downloadMaterial,
   openSummaryModal,
   closeSummaryModal,
   selectedRecordingForSummary,
@@ -28,13 +32,22 @@ const StudentDashboardView = ({
   handleJoinSession,
   loadSessions,
   loadMissedSessions,
-  playRecording
+  scheduledSessions,
+  loadingScheduled,
+  loadScheduledSessions,
+  playRecording,
+  onMarkAsReviewed,
+  onUnmarkAsReviewed,
+  reviewingSessionId
 }) => {
   const [activeTab, setActiveTab] = useState('webinars');
   
   const [sortBy, setSortBy] = useState('date');
   const [sortOrder, setSortOrder] = useState('desc');
   const [searchQuery, setSearchQuery] = useState('');
+  const [filterType, setFilterType] = useState('all');
+  const [groupBy, setGroupBy] = useState('day');
+  const [expandedGroups, setExpandedGroups] = useState(new Set());
   const [summaryActiveTab, setSummaryActiveTab] = useState('timed');
 
   const summaryTabs = [
@@ -44,6 +57,99 @@ const StudentDashboardView = ({
     { id: 'structure', label: 'Структура', field: 'aiStructure' },
     { id: 'questions', label: 'Вопросы', field: 'aiQuestions' }
   ];
+
+  const formatFileSize = (bytes) => {
+    if (!bytes) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  };
+
+  const getFileIcon = (fileType) => {
+    if (fileType?.includes('pdf')) return 'PDF';
+    if (fileType?.includes('image')) return 'IMG';
+    if (fileType?.includes('video')) return 'VID';
+    if (fileType?.includes('audio')) return 'AUD';
+    if (fileType?.includes('word')) return 'DOC';
+    if (fileType?.includes('sheet')) return 'XLS';
+    if (fileType?.includes('presentation')) return 'PPT';
+    return 'FILE';
+  };
+
+  const downloadTextContent = (content, filename) => {
+    if (!content) return;
+    let textContent = typeof content === 'object' 
+      ? (content.text || JSON.stringify(content, null, 2))
+      : String(content);
+    const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadTextAsDoc = (content, filename) => {
+    if (!content) return;
+    let textContent = typeof content === 'object' 
+      ? (content.text || JSON.stringify(content, null, 2))
+      : String(content);
+    const htmlContent = `<!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>${filename}</title>
+      <style>
+        body { font-family: 'Times New Roman', serif; font-size: 12pt; margin: 2cm; line-height: 1.5; }
+        pre { white-space: pre-wrap; font-family: inherit; }
+      </style>
+    </head>
+    <body>
+      <pre>${escapeHtml(textContent)}</pre>
+    </body>
+    </html>`;
+    const blob = new Blob([htmlContent], { type: 'application/msword' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = `${filename}.doc`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const escapeHtml = (text) => {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  };
+
+  const getMediaTypes = (recording) => {
+    const filePath = recording.filePath || recording.recordingPath || '';
+    const fileExtension = filePath.match(/\.([^.]+)$/i)?.[1]?.toLowerCase();
+    const videoExtensions = ['mp4', 'webm', 'mov', 'avi', 'mkv', 'mpeg', 'ogv'];
+    const audioExtensions = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'];
+    
+    const isVideoFile = videoExtensions.includes(fileExtension);
+    const isAudioFile = audioExtensions.includes(fileExtension);
+    
+    if (recording.type === 'video' || isVideoFile) {
+      return { hasVideo: true, hasAudio: true };
+    }
+    
+    if (recording.type === 'audio' || isAudioFile) {
+      return { hasVideo: false, hasAudio: true };
+    }
+    
+    return { hasVideo: false, hasAudio: false };
+  };
 
   const getSummaryText = (recording, tabId) => {
     if (!recording) return '';
@@ -115,6 +221,89 @@ const StudentDashboardView = ({
     return filtered;
   }, [missedSessions, searchQuery, sortOrder]);
 
+  const getWeekNumber = (date) => {
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() + 3 - (d.getDay() + 6) % 7);
+    const week1 = new Date(d.getFullYear(), 0, 4);
+    return 1 + Math.round(((d - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
+  };
+
+  const getStartOfWeek = (date) => {
+    const d = new Date(date);
+    const day = d.getDay();
+    const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+    return new Date(d.setDate(diff));
+  };
+
+  const filteredRecordings = useMemo(() => {
+    let filtered = [...recordings];
+    if (filterType !== 'all') filtered = filtered.filter(r => r.type === filterType);
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      filtered = filtered.filter(r =>
+        (r.title || '').toLowerCase().includes(q) ||
+        (r.courseTitle || '').toLowerCase().includes(q) ||
+        (r.teacherName || '').toLowerCase().includes(q)
+      );
+    }
+    return filtered;
+  }, [recordings, filterType, searchQuery]);
+
+  const groupedRecordings = useMemo(() => {
+    const groups = new Map();
+    filteredRecordings.forEach(rec => {
+      let groupKey, groupTitle;
+      if (groupBy === 'day') {
+        const date = new Date(rec.createdAt);
+        const today = new Date();
+        const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
+        if (date.toDateString() === today.toDateString()) { groupKey = 'today'; groupTitle = 'Сегодня'; }
+        else if (date.toDateString() === yesterday.toDateString()) { groupKey = 'yesterday'; groupTitle = 'Вчера'; }
+        else { groupKey = date.toISOString().split('T')[0]; groupTitle = date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }); }
+      } else if (groupBy === 'week') {
+        const date = new Date(rec.createdAt);
+        const wn = getWeekNumber(date); const yr = date.getFullYear();
+        groupKey = `${yr}-W${wn}`;
+        const ws = getStartOfWeek(date); const we = new Date(ws); we.setDate(we.getDate() + 6);
+        groupTitle = `${ws.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} – ${we.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+      } else {
+        groupKey = rec.courseTitle || rec.subjectName || 'Без предмета';
+        groupTitle = groupKey;
+      }
+      if (!groups.has(groupKey)) groups.set(groupKey, { id: groupKey, title: groupTitle, items: [] });
+      groups.get(groupKey).items.push(rec);
+    });
+    const sorted = Array.from(groups.values());
+    if (groupBy === 'day') {
+      sorted.sort((a, b) => {
+        if (a.id === 'today') return -1; if (b.id === 'today') return 1;
+        if (a.id === 'yesterday') return -1; if (b.id === 'yesterday') return 1;
+        return b.id.localeCompare(a.id);
+      });
+    } else if (groupBy === 'week') {
+      sorted.sort((a, b) => b.id.localeCompare(a.id));
+    } else {
+      sorted.sort((a, b) => a.title.localeCompare(b.title));
+    }
+    return sorted;
+  }, [filteredRecordings, groupBy]);
+
+  const toggleGroup = (id) => {
+    const next = new Set(expandedGroups);
+    next.has(id) ? next.delete(id) : next.add(id);
+    setExpandedGroups(next);
+  };
+
+  const expandAllGroups = () => setExpandedGroups(new Set(groupedRecordings.map(g => g.id)));
+  const collapseAllGroups = () => setExpandedGroups(new Set());
+
+  useMemo(() => {
+    if (groupedRecordings.length > 0 && expandedGroups.size === 0) {
+      setExpandedGroups(new Set([groupedRecordings[0].id]));
+    }
+  }, [groupedRecordings]);
+
   const handleOpenSummaryModal = (recording, defaultTab = 'timed') => {
     setSummaryActiveTab(defaultTab);
     openSummaryModal(recording);
@@ -122,6 +311,84 @@ const StudentDashboardView = ({
 
   const handlePlayClick = (recording) => {
     playRecording(recording);
+  };
+
+  const handleSessionClick = (sessionId) => {
+    setSelectedSession(String(sessionId));
+    handleJoinSession();
+  };
+
+  const unreviewedCount = missedSessions?.filter(s => !s.hasReviewed).length || 0;
+
+  const now = new Date();
+  const todayStr = now.toDateString();
+  const startOfWeek = new Date(now);
+  startOfWeek.setHours(0, 0, 0, 0);
+  startOfWeek.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+  const endOfWeek = new Date(startOfWeek);
+  endOfWeek.setDate(startOfWeek.getDate() + 7);
+
+  const scheduledToday = (scheduledSessions || []).filter(s => {
+    const d = new Date(s.scheduledStart);
+    return d.toDateString() === todayStr;
+  });
+  const scheduledThisWeek = (scheduledSessions || []).filter(s => {
+    const d = new Date(s.scheduledStart);
+    return d >= startOfWeek && d < endOfWeek;
+  });
+
+  const [calMonth, setCalMonth] = useState(() => {
+    const d = new Date(); d.setDate(1); return d;
+  });
+
+  const calDays = useMemo(() => {
+    const year = calMonth.getFullYear();
+    const month = calMonth.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    const startPad = (firstDay.getDay() + 6) % 7;
+    const days = [];
+    for (let i = 0; i < startPad; i++) days.push(null);
+    for (let d = 1; d <= lastDay.getDate(); d++) days.push(new Date(year, month, d));
+    return days;
+  }, [calMonth]);
+
+  const scheduledDates = useMemo(() => {
+    const set = new Set();
+    (scheduledSessions || []).forEach(s => {
+      const d = new Date(s.scheduledStart);
+      set.add(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
+    });
+    return set;
+  }, [scheduledSessions]);
+
+  const activeDates = useMemo(() => {
+    const set = new Set();
+    (sessions || []).forEach(s => {
+      const d = new Date(s.startTime);
+      set.add(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
+    });
+    return set;
+  }, [sessions]);
+
+  // Стили для компактных медиа-плееров
+  const compactVideoStyle = {
+    width: '100%',
+    maxWidth: '400px',
+    height: 'auto',
+    maxHeight: '225px',
+    borderRadius: '8px',
+    margin: '10px auto',
+    display: 'block',
+    backgroundColor: '#000',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+  };
+
+  const compactAudioStyle = {
+    width: '100%',
+    maxWidth: '400px',
+    margin: '10px auto',
+    display: 'block'
   };
 
   return (
@@ -149,6 +416,13 @@ const StudentDashboardView = ({
           display: flex;
           align-items: center;
           gap: 12px;
+        }
+
+        .logo {
+          width: 48px;
+          height: 48px;
+          background-color: #7B61FF;
+          border-radius: 12px;
         }
 
         .title {
@@ -293,7 +567,6 @@ const StudentDashboardView = ({
           background-color: white;
           cursor: pointer;
           outline: none;
-          transition: all 0.2s;
         }
 
         .sort-select:focus {
@@ -346,18 +619,12 @@ const StudentDashboardView = ({
           background-color: #f9fafb;
           border-radius: 16px;
           border: 1px solid #e5e7eb;
-          cursor: pointer;
           transition: all 0.2s;
         }
 
         .session-card:hover {
           border-color: #7B61FF;
           box-shadow: 0 2px 8px rgba(123, 97, 255, 0.1);
-        }
-
-        .session-card.selected {
-          border: 2px solid #7B61FF;
-          background-color: #F5F3FF;
         }
 
         .session-title {
@@ -373,13 +640,42 @@ const StudentDashboardView = ({
           margin-bottom: 4px;
         }
 
+        .btn-enter {
+          margin-top: 12px;
+          padding: 10px 20px;
+          background-color: #7B61FF;
+          color: white;
+          border: none;
+          border-radius: 12px;
+          font-size: 14px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.2s;
+          width: 100%;
+        }
+
+        .btn-enter:hover:not(:disabled) {
+          background-color: #6750E0;
+          transform: translateY(-1px);
+        }
+
+        .btn-enter:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
         .missed-session-card {
           padding: 20px;
-          background-color: #FEF3C7;
+          background-color: #FFF5F5;
           border-radius: 16px;
-          border: 1px solid #FDE68A;
+          border: 1px solid #FEE2E2;
           margin-bottom: 16px;
           transition: all 0.2s;
+        }
+
+        .missed-session-card.reviewed {
+          background-color: #F0FDF4;
+          border-color: #D1FAE5;
         }
 
         .missed-session-card:hover {
@@ -398,16 +694,36 @@ const StudentDashboardView = ({
         .missed-session-title {
           font-size: 18px;
           font-weight: 600;
-          color: #92400E;
+          color: #991B1B;
           margin: 0;
+        }
+
+        .missed-session-card.reviewed .missed-session-title {
+          color: #065F46;
+        }
+
+        .reviewed-badge {
+          display: inline-block;
+          margin-left: 12px;
+          padding: 2px 10px;
+          background-color: #10B981;
+          color: white;
+          border-radius: 20px;
+          font-size: 11px;
+          font-weight: 500;
         }
 
         .missed-date {
           font-size: 13px;
-          color: #B45309;
-          background-color: #FFEDD5;
+          color: #991B1B;
+          background-color: #FEE2E2;
           padding: 4px 12px;
           border-radius: 20px;
+        }
+
+        .missed-session-card.reviewed .missed-date {
+          color: #065F46;
+          background-color: #D1FAE5;
         }
 
         .missed-info {
@@ -417,12 +733,17 @@ const StudentDashboardView = ({
         .missed-subject {
           display: inline-block;
           padding: 4px 12px;
-          background-color: #FFEDD5;
-          color: #92400E;
+          background-color: #FEE2E2;
+          color: #991B1B;
           border-radius: 20px;
           font-size: 13px;
           margin-right: 8px;
           margin-bottom: 8px;
+        }
+
+        .missed-session-card.reviewed .missed-subject {
+          background-color: #D1FAE5;
+          color: #065F46;
         }
 
         .missed-group {
@@ -525,10 +846,72 @@ const StudentDashboardView = ({
           box-shadow: 0 2px 8px rgba(16, 185, 129, 0.2);
         }
 
-        .recordings-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-          gap: 20px;
+        .btn-download-small {
+          padding: 4px 12px;
+          background-color: #10B981;
+          color: white;
+          border: none;
+          border-radius: 6px;
+          cursor: pointer;
+          font-size: 12px;
+          transition: all 0.2s;
+        }
+
+        .btn-download-small:hover {
+          background-color: #059669;
+        }
+
+        .btn-review {
+          padding: 10px 20px;
+          background-color: #10B981;
+          color: white;
+          border: none;
+          border-radius: 12px;
+          font-size: 14px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+
+        .btn-review:hover:not(:disabled) {
+          background-color: #059669;
+          transform: translateY(-1px);
+        }
+
+        .btn-review:disabled {
+          opacity: 0.6;
+          cursor: wait;
+        }
+
+        .btn-unreview {
+          padding: 10px 20px;
+          background-color: #F59E0B;
+          color: white;
+          border: none;
+          border-radius: 12px;
+          font-size: 14px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+
+        .btn-unreview:hover:not(:disabled) {
+          background-color: #D97706;
+          transform: translateY(-1px);
+        }
+
+        .btn-unreview:disabled {
+          opacity: 0.6;
+          cursor: wait;
+        }
+
+        .reviewed-info {
+          margin-top: 12px;
+          padding-top: 12px;
+          border-top: 1px solid #E5E7EB;
+          font-size: 12px;
+          color: #6B7280;
+          text-align: right;
         }
 
         .recording-card {
@@ -606,6 +989,125 @@ const StudentDashboardView = ({
           gap: 10px;
           margin-top: 12px;
           flex-wrap: wrap;
+        }
+
+        .materials-section {
+          margin-top: 16px;
+          padding-top: 12px;
+          border-top: 1px solid #e5e7eb;
+        }
+
+        .materials-title {
+          font-size: 13px;
+          font-weight: 600;
+          color: #374151;
+          margin-bottom: 10px;
+        }
+
+        .materials-list-inline {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+
+        .material-item-inline {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 8px 12px;
+          background-color: #e5e7eb;
+          border-radius: 10px;
+          font-size: 13px;
+          flex-wrap: wrap;
+        }
+
+        .material-icon-small {
+          font-size: 11px;
+          font-weight: 600;
+          padding: 2px 6px;
+          background: #d1d5db;
+          border-radius: 4px;
+          min-width: 35px;
+          text-align: center;
+        }
+
+        .material-name-inline {
+          flex: 1;
+          color: #111827;
+          word-break: break-word;
+        }
+
+        .material-size {
+          font-size: 11px;
+          color: #6B7280;
+        }
+
+        .comment-bubble {
+          margin: 10px 0;
+          padding: 10px 14px;
+          background-color: #FEF3C7;
+          border-radius: 10px;
+          display: flex;
+          gap: 8px;
+          align-items: flex-start;
+        }
+
+        .comment-icon {
+          font-size: 16px;
+        }
+
+        .comment-label {
+          font-size: 11px;
+          font-weight: 600;
+          color: #92400E;
+          margin-bottom: 3px;
+        }
+
+        .comment-text {
+          font-size: 13px;
+          color: #78350F;
+          white-space: pre-wrap;
+          line-height: 1.5;
+        }
+
+        .download-text-buttons {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          margin-top: 10px;
+          padding-top: 12px;
+          border-top: 1px solid #e5e7eb;
+        }
+
+        .group-section {
+          margin-bottom: 24px;
+        }
+
+        .group-header {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          padding: 12px 16px;
+          background-color: #f9fafb;
+          border-radius: 12px;
+          cursor: pointer;
+          transition: all 0.2s;
+          margin-bottom: 12px;
+          border: 1px solid #e5e7eb;
+        }
+
+        .group-header:hover {
+          background-color: #f3f4f6;
+        }
+
+        .group-icon {
+          font-size: 16px;
+          transition: transform 0.2s;
+          display: inline-block;
+        }
+
+        .group-icon.expanded {
+          transform: rotate(90deg);
         }
 
         .empty-state {
@@ -817,6 +1319,54 @@ const StudentDashboardView = ({
           display: flex;
           justify-content: flex-end;
           gap: 12px;
+          flex-wrap: wrap;
+        }
+
+        .stats-mini {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+          gap: 16px;
+          margin-bottom: 24px;
+        }
+
+        .stat-mini-card {
+          text-align: center;
+          padding: 16px;
+          background: #f9fafb;
+          border-radius: 16px;
+          border: 1px solid #e5e7eb;
+        }
+
+        .stat-mini-value {
+          font-size: 32px;
+          font-weight: 700;
+          color: #111827;
+        }
+
+        .stat-mini-label {
+          font-size: 13px;
+          color: #6B7280;
+          margin-top: 4px;
+        }
+
+        /* Компактные стили для видео и аудио */
+        .compact-video {
+          width: 100%;
+          max-width: 400px;
+          height: auto;
+          max-height: 225px;
+          border-radius: 8px;
+          margin: 10px auto;
+          display: block;
+          background-color: #000;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .compact-audio {
+          width: 100%;
+          max-width: 400px;
+          margin: 10px auto;
+          display: block;
         }
 
         @media (max-width: 768px) {
@@ -848,9 +1398,6 @@ const StudentDashboardView = ({
           .search-input {
             width: 100%;
           }
-          .recordings-grid {
-            grid-template-columns: 1fr;
-          }
           .button-group {
             flex-direction: column;
           }
@@ -877,11 +1424,25 @@ const StudentDashboardView = ({
           .summary-buttons {
             justify-content: center;
           }
+          .material-item-inline {
+            flex-direction: column;
+            align-items: flex-start;
+          }
+          .recordings-list {
+            padding-left: 0;
+          }
+          .compact-video {
+            max-width: 100%;
+          }
+          .compact-audio {
+            max-width: 100%;
+          }
         }
       `}</style>
 
       <div className="header">
         <div className="logo-section">
+          <div className="logo"></div>
           <span className="title">ВебРум</span>
         </div>
         <div className="user-info">
@@ -905,8 +1466,8 @@ const StudentDashboardView = ({
           className={`tab-button ${activeTab === 'missed' ? 'active' : ''}`}
         >
           Пропущенные
-          {missedSessions?.length > 0 && (
-            <span className="missed-badge">{missedSessions.length}</span>
+          {unreviewedCount > 0 && (
+            <span className="missed-badge">{unreviewedCount}</span>
           )}
         </button>
         <button
@@ -926,57 +1487,180 @@ const StudentDashboardView = ({
       <div className="main-content">
         {activeTab === 'webinars' && (
           <div className="section">
-            <div className="section-title">
-              Доступные вебинары
-              <button className="refresh-button" onClick={loadSessions} disabled={loading}>
-                {loading ? 'Загрузка...' : 'Обновить'}
-              </button>
+            <div className="stats-mini">
+              <div className="stat-mini-card">
+                <div className="stat-mini-value">{sessions.length}</div>
+                <div className="stat-mini-label">Активных сейчас</div>
+              </div>
+              <div className="stat-mini-card">
+                <div className="stat-mini-value">{scheduledToday.length}</div>
+                <div className="stat-mini-label">Сегодня запланировано</div>
+              </div>
+              <div className="stat-mini-card">
+                <div className="stat-mini-value">{scheduledThisWeek.length}</div>
+                <div className="stat-mini-label">На этой неделе</div>
+              </div>
             </div>
 
-            {error && <div className="error-message">{error}</div>}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: '24px', alignItems: 'start' }}>
+              <div>
+                <div style={{ marginBottom: '24px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#111827' }}>Активные вебинары</h3>
+                    <button className="refresh-button" onClick={loadSessions} disabled={loading} style={{ fontSize: '13px', padding: '6px 14px' }}>
+                      {loading ? 'Загрузка...' : 'Обновить'}
+                    </button>
+                  </div>
 
-            {loading && <div className="loading-spinner">Загрузка...</div>}
+                  {error && <div className="error-message">{error}</div>}
 
-            {!loading && sessions.length === 0 ? (
-              <div className="empty-state">
-                <p>Нет активных вебинаров</p>
-                <p style={{ fontSize: '14px', marginTop: '8px' }}>
-                  Проверьте позже, возможно скоро появятся новые вебинары
-                </p>
-              </div>
-            ) : (
-              <>
-                <div className="session-list">
-                  {sessions.map(session => (
-                    <div
-                      key={session.id}
-                      className={`session-card ${selectedSession === String(session.id) ? 'selected' : ''}`}
-                      onClick={() => setSelectedSession(String(session.id))}
-                    >
-                      <div className="session-title">
-                        {session.courseTitle || 'Вебинар'}
-                      </div>
-                      <div className="session-meta">
-                        Преподаватель: {session.teacherName || 'Неизвестно'}
-                      </div>
-                      <div className="session-meta">
-                        Начало: {new Date(session.startTime).toLocaleString()}
-                      </div>
+                  {loading ? (
+                    <div className="loading-spinner">Загрузка...</div>
+                  ) : sessions.length === 0 ? (
+                    <div style={{ padding: '20px', textAlign: 'center', background: '#f9fafb', borderRadius: '12px', color: '#6B7280', fontSize: '14px' }}>
+                      Нет активных вебинаров
                     </div>
+                  ) : (
+                    <div className="session-list">
+                      {sessions.map(session => (
+                        <div key={session.id} className="session-card">
+                          <div className="session-title">{session.courseTitle || 'Вебинар'}</div>
+                          <div className="session-meta">Преподаватель: {session.teacherName || 'Неизвестно'}</div>
+                          <div className="session-meta">Начало: {new Date(session.startTime).toLocaleString('ru-RU')}</div>
+                          <button
+                            onClick={() => handleSessionClick(session.id)}
+                            className="btn-enter"
+                            disabled={loading && selectedSession === String(session.id)}
+                          >
+                            {loading && selectedSession === String(session.id) ? 'Подключение...' : 'Войти'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#111827' }}>Предстоящие занятия</h3>
+                    <button className="refresh-button" onClick={loadScheduledSessions} disabled={loadingScheduled} style={{ fontSize: '13px', padding: '6px 14px' }}>
+                      {loadingScheduled ? 'Загрузка...' : 'Обновить'}
+                    </button>
+                  </div>
+
+                  {loadingScheduled ? (
+                    <div className="loading-spinner">Загрузка...</div>
+                  ) : (scheduledSessions || []).length === 0 ? (
+                    <div style={{ padding: '20px', textAlign: 'center', background: '#f9fafb', borderRadius: '12px', color: '#6B7280', fontSize: '14px' }}>
+                      Нет запланированных занятий
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      {(scheduledSessions || []).map(session => {
+                        const dt = new Date(session.scheduledStart);
+                        const isToday = dt.toDateString() === todayStr;
+                        return (
+                          <div key={session.id} style={{ padding: '14px 16px', background: isToday ? '#F5F3FF' : '#f9fafb', borderRadius: '12px', border: `1px solid ${isToday ? '#7B61FF' : '#e5e7eb'}` }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '6px' }}>
+                              <div style={{ fontWeight: '600', fontSize: '14px', color: '#111827' }}>
+                                {session.title || session.courseTitle || 'Занятие'}
+                              </div>
+                              {isToday && (
+                                <span style={{ padding: '2px 8px', background: '#7B61FF', color: 'white', borderRadius: '20px', fontSize: '11px', fontWeight: '600' }}>Сегодня</span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: '13px', color: '#6B7280', marginTop: '4px' }}>
+                              {dt.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })} в {dt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                            <div style={{ fontSize: '13px', color: '#6B7280' }}>
+                              {session.courseTitle} · {session.teacherName}
+                              {session.duration && ` · ${session.duration} мин`}
+                            </div>
+                            {session.description && (
+                              <div style={{ fontSize: '12px', color: '#374151', marginTop: '6px', padding: '6px 8px', background: 'white', borderRadius: '6px' }}>{session.description}</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ background: '#f9fafb', borderRadius: '16px', border: '1px solid #e5e7eb', padding: '16px', position: 'sticky', top: '20px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <button
+                    onClick={() => setCalMonth(m => { const d = new Date(m); d.setMonth(d.getMonth() - 1); return d; })}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px', color: '#6B7280', padding: '4px 8px', borderRadius: '6px' }}
+                  >‹</button>
+                  <span style={{ fontWeight: '600', fontSize: '14px', color: '#111827' }}>
+                    {calMonth.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })}
+                  </span>
+                  <button
+                    onClick={() => setCalMonth(m => { const d = new Date(m); d.setMonth(d.getMonth() + 1); return d; })}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px', color: '#6B7280', padding: '4px 8px', borderRadius: '6px' }}
+                  >›</button>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '2px', marginBottom: '4px' }}>
+                  {['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(d => (
+                    <div key={d} style={{ textAlign: 'center', fontSize: '11px', fontWeight: '600', color: '#9CA3AF', padding: '4px 0' }}>{d}</div>
                   ))}
                 </div>
 
-                {selectedSession && (
-                  <button
-                    className="btn-primary"
-                    onClick={handleJoinSession}
-                    disabled={loading || isJoined}
-                  >
-                    {loading ? 'Присоединение...' : isJoined ? 'Уже в вебинаре' : 'Присоединиться к вебинару'}
-                  </button>
-                )}
-              </>
-            )}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '2px' }}>
+                  {calDays.map((day, i) => {
+                    if (!day) return <div key={`empty-${i}`} />;
+                    const key = `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
+                    const isToday = day.toDateString() === todayStr;
+                    const hasScheduled = scheduledDates.has(key);
+                    const hasActive = activeDates.has(key);
+                    return (
+                      <div
+                        key={key}
+                        style={{
+                          textAlign: 'center',
+                          padding: '5px 2px',
+                          borderRadius: '8px',
+                          fontSize: '13px',
+                          fontWeight: isToday ? '700' : '400',
+                          background: isToday ? '#7B61FF' : 'transparent',
+                          color: isToday ? 'white' : '#111827',
+                          position: 'relative',
+                          cursor: hasScheduled || hasActive ? 'pointer' : 'default',
+                        }}
+                        title={hasScheduled ? 'Запланировано занятие' : hasActive ? 'Активный вебинар' : ''}
+                      >
+                        {day.getDate()}
+                        {(hasScheduled || hasActive) && (
+                          <div style={{
+                            position: 'absolute',
+                            bottom: '2px',
+                            left: '50%',
+                            transform: 'translateX(-50%)',
+                            width: '5px',
+                            height: '5px',
+                            borderRadius: '50%',
+                            background: isToday ? 'white' : hasActive ? '#10B981' : '#7B61FF',
+                          }} />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px solid #e5e7eb', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#6B7280' }}>
+                    <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10B981' }} />
+                    Активный вебинар
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#6B7280' }}>
+                    <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#7B61FF' }} />
+                    Запланировано
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -1021,7 +1705,7 @@ const StudentDashboardView = ({
                   </>
                 ) : (
                   <>
-                    <p>Отлично Вы не пропустили ни одного занятия</p>
+                    <p>Отлично! Вы не пропустили ни одного занятия</p>
                     <p style={{ fontSize: '14px', marginTop: '8px' }}>
                       Продолжайте в том же духе
                     </p>
@@ -1030,93 +1714,382 @@ const StudentDashboardView = ({
               </div>
             ) : (
               <>
-                {!searchQuery && missedSessions?.length > 0 && (
-                  <div className="empty-state" style={{ marginBottom: '20px', padding: '20px' }}>
-                    <p style={{ fontWeight: 'bold', color: '#92400E' }}>
-                      У вас есть {missedSessions.length} пропущенных занятий
-                    </p>
-                    <p style={{ fontSize: '14px' }}>
-                      Ознакомьтесь с записями и конспектами, чтобы не отставать от программы
-                    </p>
-                  </div>
+                {filteredAndSortedMissed.filter(s => !s.hasReviewed).length > 0 && (
+                  <>
+                    {filteredAndSortedMissed
+                      .filter(session => !session.hasReviewed)
+                      .map(session => {
+                        const availableTabs = summaryTabs.filter(tab => hasSummaryContent(session, tab.id));
+                        const isReviewing = reviewingSessionId === session.id;
+                        const mediaTypes = getMediaTypes(session);
+                        const showVideo = mediaTypes.hasVideo;
+                        const showAudio = mediaTypes.hasAudio;
+                        const durationFormatted = session.duration && !isNaN(session.duration) 
+                          ? `${Math.floor(session.duration / 60)}:${String(session.duration % 60).padStart(2, '0')}` 
+                          : '';
+                        
+                        return (
+                          <div key={session.id} className="missed-session-card">
+                            <div className="missed-session-header">
+                              <h4 className="missed-session-title">
+                                {session.courseTitle || session.title || 'Вебинар'}
+                              </h4>
+                              <span className="missed-date">
+                                {new Date(session.startTime || session.scheduledStart).toLocaleDateString('ru-RU', {
+                                  day: 'numeric',
+                                  month: 'long',
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit'
+                                })}
+                              </span>
+                            </div>
+                            
+                            <div className="missed-info">
+                              {session.subjectName && (
+                                <span className="missed-subject">{session.subjectName}</span>
+                              )}
+                              {session.groupName && (
+                                <span className="missed-group">{session.groupName}</span>
+                              )}
+                            </div>
+
+                            {session.description && (
+                              <div className="missed-description">
+                                {session.description}
+                              </div>
+                            )}
+
+                            {session.sessionComment && (
+                              <div className="comment-bubble">
+                                <span className="comment-icon">💬</span>
+                                <div>
+                                  <div className="comment-label">Комментарий преподавателя</div>
+                                  <div className="comment-text">{session.sessionComment}</div>
+                                </div>
+                              </div>
+                            )}
+
+                            {(session.filePath || session.recordingPath) && (
+                              <>
+                                {showVideo && (
+                                  <video
+                                    controls
+                                    src={`${API_BASE_URL}${session.filePath || session.recordingPath}`}
+                                    className="compact-video"
+                                  />
+                                )}
+                                {showAudio && !showVideo && (
+                                  <audio
+                                    controls
+                                    src={`${API_BASE_URL}${session.filePath || session.recordingPath}`}
+                                    className="compact-audio"
+                                  />
+                                )}
+                              </>
+                            )}
+
+                            {durationFormatted && (
+                              <div className="recording-detail">
+                                Длительность: {durationFormatted}
+                              </div>
+                            )}
+
+                            {availableTabs.length > 0 ? (
+                              <div className="summary-buttons">
+                                {availableTabs.map(tab => (
+                                  <button
+                                    key={tab.id}
+                                    className="summary-btn has-content"
+                                    onClick={() => handleOpenSummaryModal(session, tab.id)}
+                                  >
+                                    {tab.label}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="no-summary">
+                                Конспекты пока не добавлены
+                              </div>
+                            )}
+
+                            {availableTabs.length > 0 && (
+                              <div className="download-text-buttons">
+                                <span style={{ fontSize: '12px', color: '#6B7280', alignSelf: 'center' }}>
+                                  Скачать конспекты:
+                                </span>
+                                {availableTabs.map(tab => {
+                                  const text = getSummaryText(session, tab.id);
+                                  if (!text) return null;
+                                  return (
+                                    <React.Fragment key={tab.id}>
+                                      <button
+                                        className="btn-download-small"
+                                        onClick={() => downloadTextContent(text, `${session.courseTitle || 'конспект'}_${tab.label}.txt`)}
+                                        style={{ backgroundColor: '#6B7280' }}
+                                      >
+                                        {tab.label} (TXT)
+                                      </button>
+                                      <button
+                                        className="btn-download-small"
+                                        onClick={() => downloadTextAsDoc(text, `${session.courseTitle || 'конспект'}_${tab.label}`)}
+                                        style={{ backgroundColor: '#6B7280' }}
+                                      >
+                                        {tab.label} (DOC)
+                                      </button>
+                                    </React.Fragment>
+                                  );
+                                })}
+                              </div>
+                            )}
+
+                            {session.materials && session.materials.length > 0 && (
+                              <div className="materials-section">
+                                <div className="materials-title">Материалы к лекции ({session.materials.length}):</div>
+                                <div className="materials-list-inline">
+                                  {session.materials.map(material => (
+                                    <div key={material.id} className="material-item-inline">
+                                      <span className="material-icon-small">{getFileIcon(material.fileType)}</span>
+                                      <span className="material-name-inline">{material.originalName}</span>
+                                      <span className="material-size">{formatFileSize(material.fileSize)}</span>
+                                      <button 
+                                        className="btn-download-small" 
+                                        onClick={() => downloadMaterial(material.filePath, material.originalName)}
+                                      >
+                                        Скачать
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="button-group">
+                              {(session.filePath || session.recordingPath) ? (
+                                <button
+                                  className="btn-play"
+                                  onClick={() => handlePlayClick(session)}
+                                >
+                                  {showVideo ? 'Смотреть запись' : 'Слушать запись'}
+                                </button>
+                              ) : (
+                                <button className="btn-play" disabled>
+                                  Запись пока недоступна
+                                </button>
+                              )}
+                              {(session.filePath || session.recordingPath) && (
+                                <button
+                                  className="btn-download"
+                                  onClick={() => downloadRecording(session.filePath || session.recordingPath, session.courseTitle)}
+                                >
+                                  Скачать запись
+                                </button>
+                              )}
+                              <button
+                                className="btn-review"
+                                onClick={() => onMarkAsReviewed(session)}
+                                disabled={isReviewing}
+                              >
+                                {isReviewing ? '...' : 'Отметить как изученное'}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </>
                 )}
 
-                {filteredAndSortedMissed.map(session => {
-                  const availableTabs = summaryTabs.filter(tab => hasSummaryContent(session, tab.id));
-                  
-                  return (
-                    <div key={session.id} className="missed-session-card">
-                      <div className="missed-session-header">
-                        <h4 className="missed-session-title">
-                          {session.courseTitle || session.title || 'Вебинар'}
-                        </h4>
-                        <span className="missed-date">
-                          {new Date(session.startTime || session.scheduledStart).toLocaleDateString('ru-RU', {
-                            day: 'numeric',
-                            month: 'long',
-                            year: 'numeric'
-                          })}
-                        </span>
-                      </div>
-                      
-                      <div className="missed-info">
-                        {session.subjectName && (
-                          <span className="missed-subject">{session.subjectName}</span>
-                        )}
-                        {session.groupName && (
-                          <span className="missed-group">{session.groupName}</span>
-                        )}
-                      </div>
+                {filteredAndSortedMissed.filter(s => s.hasReviewed).length > 0 && (
+                  <>
+                    {filteredAndSortedMissed
+                      .filter(session => session.hasReviewed)
+                      .map(session => {
+                        const availableTabs = summaryTabs.filter(tab => hasSummaryContent(session, tab.id));
+                        const isReviewing = reviewingSessionId === session.id;
+                        const mediaTypes = getMediaTypes(session);
+                        const showVideo = mediaTypes.hasVideo;
+                        const showAudio = mediaTypes.hasAudio;
+                        const durationFormatted = session.duration && !isNaN(session.duration) 
+                          ? `${Math.floor(session.duration / 60)}:${String(session.duration % 60).padStart(2, '0')}` 
+                          : '';
+                        
+                        return (
+                          <div key={session.id} className="missed-session-card reviewed">
+                            <div className="missed-session-header">
+                              <h4 className="missed-session-title">
+                                {session.courseTitle || session.title || 'Вебинар'}
+                                <span className="reviewed-badge">Ознакомлен</span>
+                              </h4>
+                              <span className="missed-date">
+                                {new Date(session.startTime || session.scheduledStart).toLocaleDateString('ru-RU', {
+                                  day: 'numeric',
+                                  month: 'long',
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit'
+                                })}
+                              </span>
+                            </div>
+                            
+                            <div className="missed-info">
+                              {session.subjectName && (
+                                <span className="missed-subject">{session.subjectName}</span>
+                              )}
+                              {session.groupName && (
+                                <span className="missed-group">{session.groupName}</span>
+                              )}
+                            </div>
 
-                      {session.description && (
-                        <div className="missed-description">
-                          {session.description}
-                        </div>
-                      )}
+                            {session.description && (
+                              <div className="missed-description">
+                                {session.description}
+                              </div>
+                            )}
 
-                      {availableTabs.length > 0 ? (
-                        <div className="summary-buttons">
-                          {availableTabs.map(tab => (
-                            <button
-                              key={tab.id}
-                              className="summary-btn has-content"
-                              onClick={() => handleOpenSummaryModal(session, tab.id)}
-                            >
-                              {tab.label}
-                            </button>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="no-summary">
-                          Конспекты пока не добавлены
-                        </div>
-                      )}
+                            {session.sessionComment && (
+                              <div className="comment-bubble">
+                                <span className="comment-icon">💬</span>
+                                <div>
+                                  <div className="comment-label">Комментарий преподавателя</div>
+                                  <div className="comment-text">{session.sessionComment}</div>
+                                </div>
+                              </div>
+                            )}
 
-                      <div className="button-group">
-                        {session.recordingPath || session.filePath ? (
-                          <button
-                            className="btn-play"
-                            onClick={() => handlePlayClick(session)}
-                          >
-                            Смотреть запись
-                          </button>
-                        ) : (
-                          <button className="btn-play" disabled>
-                            Запись пока недоступна
-                          </button>
-                        )}
-                        {session.recordingPath && (
-                          <button
-                            className="btn-download"
-                            onClick={() => downloadRecording(session.recordingPath, session.courseTitle)}
-                          >
-                            Скачать
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+                            {(session.filePath || session.recordingPath) && (
+                              <>
+                                {showVideo && (
+                                  <video
+                                    controls
+                                    src={`${API_BASE_URL}${session.filePath || session.recordingPath}`}
+                                    className="compact-video"
+                                  />
+                                )}
+                                {showAudio && !showVideo && (
+                                  <audio
+                                    controls
+                                    src={`${API_BASE_URL}${session.filePath || session.recordingPath}`}
+                                    className="compact-audio"
+                                  />
+                                )}
+                              </>
+                            )}
+
+                            {durationFormatted && (
+                              <div className="recording-detail">
+                                Длительность: {durationFormatted}
+                              </div>
+                            )}
+
+                            {availableTabs.length > 0 ? (
+                              <div className="summary-buttons">
+                                {availableTabs.map(tab => (
+                                  <button
+                                    key={tab.id}
+                                    className="summary-btn has-content"
+                                    onClick={() => handleOpenSummaryModal(session, tab.id)}
+                                  >
+                                    {tab.label}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="no-summary">
+                                Конспекты пока не добавлены
+                              </div>
+                            )}
+
+                            {availableTabs.length > 0 && (
+                              <div className="download-text-buttons">
+                                <span style={{ fontSize: '12px', color: '#6B7280', alignSelf: 'center' }}>
+                                  Скачать конспекты:
+                                </span>
+                                {availableTabs.map(tab => {
+                                  const text = getSummaryText(session, tab.id);
+                                  if (!text) return null;
+                                  return (
+                                    <React.Fragment key={tab.id}>
+                                      <button
+                                        className="btn-download-small"
+                                        onClick={() => downloadTextContent(text, `${session.courseTitle || 'конспект'}_${tab.label}.txt`)}
+                                        style={{ backgroundColor: '#6B7280' }}
+                                      >
+                                        {tab.label} (TXT)
+                                      </button>
+                                      <button
+                                        className="btn-download-small"
+                                        onClick={() => downloadTextAsDoc(text, `${session.courseTitle || 'конспект'}_${tab.label}`)}
+                                        style={{ backgroundColor: '#6B7280' }}
+                                      >
+                                        {tab.label} (DOC)
+                                      </button>
+                                    </React.Fragment>
+                                  );
+                                })}
+                              </div>
+                            )}
+
+                            {session.materials && session.materials.length > 0 && (
+                              <div className="materials-section">
+                                <div className="materials-title">Материалы к лекции ({session.materials.length}):</div>
+                                <div className="materials-list-inline">
+                                  {session.materials.map(material => (
+                                    <div key={material.id} className="material-item-inline">
+                                      <span className="material-icon-small">{getFileIcon(material.fileType)}</span>
+                                      <span className="material-name-inline">{material.originalName}</span>
+                                      <span className="material-size">{formatFileSize(material.fileSize)}</span>
+                                      <button 
+                                        className="btn-download-small" 
+                                        onClick={() => downloadMaterial(material.filePath, material.originalName)}
+                                      >
+                                        Скачать
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="button-group">
+                              {(session.filePath || session.recordingPath) ? (
+                                <button
+                                  className="btn-play"
+                                  onClick={() => handlePlayClick(session)}
+                                >
+                                  {showVideo ? 'Смотреть запись' : 'Слушать запись'}
+                                </button>
+                              ) : (
+                                <button className="btn-play" disabled>
+                                  Запись пока недоступна
+                                </button>
+                              )}
+                              {(session.filePath || session.recordingPath) && (
+                                <button
+                                  className="btn-download"
+                                  onClick={() => downloadRecording(session.filePath || session.recordingPath, session.courseTitle)}
+                                >
+                                  Скачать запись
+                                </button>
+                              )}
+                              <button
+                                className="btn-unreview"
+                                onClick={() => onUnmarkAsReviewed(session)}
+                                disabled={isReviewing}
+                              >
+                                {isReviewing ? '...' : 'Снять отметку'}
+                              </button>
+                            </div>
+
+                            {session.reviewedAt && (
+                              <div className="reviewed-info">
+                                Изучено: {new Date(session.reviewedAt).toLocaleDateString('ru-RU')}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                  </>
+                )}
               </>
             )}
           </div>
@@ -1125,118 +2098,196 @@ const StudentDashboardView = ({
         {activeTab === 'recordings' && (
           <div className="section">
             <div className="section-title">
-              <span>Все записи вебинаров</span>
+              <span>Записи вебинаров</span>
               <div className="controls-group">
                 <input
                   type="text"
                   className="search-input"
-                  placeholder="Поиск по названию или преподавателю..."
+                  placeholder="Поиск по названию, курсу..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                 />
-                <select className="sort-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
-                  <option value="date">Сортировать по дате</option>
-                  <option value="name">Сортировать по названию</option>
-                  <option value="duration">Сортировать по длительности</option>
+                <select className="sort-select" value={filterType} onChange={(e) => setFilterType(e.target.value)}>
+                  <option value="all">Все типы</option>
+                  <option value="audio">Аудио</option>
+                  <option value="video">Видео</option>
                 </select>
-                <button
-                  className="sort-order-btn"
-                  onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
-                >
-                  {sortOrder === 'asc' ? 'По возрастанию' : 'По убыванию'}
-                </button>
+                <select className="sort-select" value={groupBy} onChange={(e) => { setGroupBy(e.target.value); setExpandedGroups(new Set()); }}>
+                  <option value="day">По дням</option>
+                  <option value="week">По неделям</option>
+                  <option value="subject">По предметам</option>
+                </select>
+                <button className="refresh-button" onClick={expandAllGroups}>Развернуть все</button>
+                <button className="refresh-button" onClick={collapseAllGroups}>Свернуть все</button>
               </div>
             </div>
 
             {loadingRecordings ? (
               <div className="loading-spinner">Загрузка записей...</div>
-            ) : filteredAndSortedRecordings.length === 0 ? (
+            ) : groupedRecordings.length === 0 ? (
               <div className="empty-state">
-                {searchQuery ? (
-                  <>
-                    <p>Ничего не найдено по запросу "{searchQuery}"</p>
-                    <p style={{ fontSize: '14px', marginTop: '8px' }}>
-                      Попробуйте изменить поисковый запрос
-                    </p>
-                  </>
+                {searchQuery || filterType !== 'all' ? (
+                  <p>Ничего не найдено</p>
                 ) : (
                   <>
                     <p>Нет доступных записей</p>
-                    <p style={{ fontSize: '14px', marginTop: '8px' }}>
-                      После завершения вебинаров здесь появятся записи
-                    </p>
+                    <p style={{ fontSize: '14px', marginTop: '8px' }}>После завершения вебинаров здесь появятся записи</p>
                   </>
                 )}
               </div>
             ) : (
-              <>
-                <div className="recordings-grid">
-                  {filteredAndSortedRecordings.map(recording => {
-                    const availableTabs = summaryTabs.filter(tab => hasSummaryContent(recording, tab.id));
-                    
-                    return (
-                      <div key={recording.id} className="recording-card">
-                        <div className="recording-title">
-                          {recording.title || 'Запись вебинара'}
-                        </div>
-                        <div className="recording-detail">
-                          Курс: {recording.courseTitle || 'Неизвестно'}
-                        </div>
-                        <div className="recording-detail">
-                          Преподаватель: {recording.teacherName || 'Неизвестно'}
-                        </div>
-                        <div className="recording-detail">
-                          Дата: {new Date(recording.createdAt).toLocaleDateString()}
-                        </div>
-                        {recording.duration && (
-                          <div className="recording-detail">
-                            Длительность: {Math.floor(recording.duration / 60)}:{String(recording.duration % 60).padStart(2, '0')}
-                          </div>
-                        )}
+              <div>
+                {groupedRecordings.map(group => (
+                  <div key={group.id} className="group-section">
+                    <div className="group-header" onClick={() => toggleGroup(group.id)}>
+                      <span className={`group-icon ${expandedGroups.has(group.id) ? 'expanded' : ''}`}>▶</span>
+                      <span className="group-title">{group.title}</span>
+                      <span className="group-count">({group.items.length})</span>
+                    </div>
 
-                        {availableTabs.length > 0 ? (
-                          <div className="summary-buttons">
-                            {availableTabs.map(tab => (
-                              <button
-                                key={tab.id}
-                                className="summary-btn has-content"
-                                onClick={() => handleOpenSummaryModal(recording, tab.id)}
-                              >
-                                {tab.label}
-                              </button>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="no-summary">
-                            Конспекты пока не добавлены
-                          </div>
-                        )}
+                    {expandedGroups.has(group.id) && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', paddingLeft: '28px' }}>
+                        {group.items.map(recording => {
+                          const mediaTypes = getMediaTypes(recording);
+                          const showVideo = mediaTypes.hasVideo;
+                          const showAudio = mediaTypes.hasAudio;
+                          const durationFormatted = recording.duration && !isNaN(recording.duration) 
+                            ? `${Math.floor(recording.duration / 60)}:${String(recording.duration % 60).padStart(2, '0')}` 
+                            : '';
+                          const availableTabs = summaryTabs.filter(tab => hasSummaryContent(recording, tab.id));
+                          
+                          return (
+                            <div key={recording.id} className="recording-card">
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px', marginBottom: '10px' }}>
+                                <div>
+                                  <div className="recording-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                    {recording.title || recording.courseTitle || 'Запись вебинара'}
+                                    {showVideo && !showAudio && (
+                                      <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: '12px', fontSize: '11px', fontWeight: '500', background: '#FEE2E2', color: '#991B1B' }}>Видео</span>
+                                    )}
+                                    {!showVideo && showAudio && (
+                                      <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: '12px', fontSize: '11px', fontWeight: '500', background: '#DBEAFE', color: '#1E40AF' }}>Аудио</span>
+                                    )}
+                                    {showVideo && showAudio && (
+                                      <>
+                                        <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: '12px', fontSize: '11px', fontWeight: '500', background: '#FEE2E2', color: '#991B1B' }}>Видео</span>
+                                        <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: '12px', fontSize: '11px', fontWeight: '500', background: '#DBEAFE', color: '#1E40AF' }}>Аудио</span>
+                                      </>
+                                    )}
+                                  </div>
+                                  <div className="recording-detail">Курс: {recording.courseTitle || 'Неизвестно'}</div>
+                                  <div className="recording-detail">Преподаватель: {recording.teacherName || 'Неизвестно'}</div>
+                                  <div className="recording-detail">
+                                    {new Date(recording.createdAt).toLocaleString('ru-RU')}
+                                    {durationFormatted && ` · ${durationFormatted}`}
+                                  </div>
+                                </div>
+                              </div>
 
-                        <div className="button-group">
-                          <button
-                            className="btn-play"
-                            onClick={() => handlePlayClick(recording)}
-                          >
-                            Смотреть запись
-                          </button>
-                          <button
-                            className="btn-download"
-                            onClick={() => downloadRecording(recording.filePath, recording.title)}
-                          >
-                            Скачать
-                          </button>
-                        </div>
+                              {recording.sessionComment && (
+                                <div className="comment-bubble">
+                                  <span className="comment-icon">💬</span>
+                                  <div>
+                                    <div className="comment-label">Комментарий преподавателя</div>
+                                    <div className="comment-text">{recording.sessionComment}</div>
+                                  </div>
+                                </div>
+                              )}
+
+                              {showVideo && (
+                                <video
+                                  controls
+                                  src={`${API_BASE_URL}${recording.filePath}`}
+                                  className="compact-video"
+                                />
+                              )}
+                              {showAudio && !showVideo && (
+                                <audio
+                                  controls
+                                  src={`${API_BASE_URL}${recording.filePath}`}
+                                  className="compact-audio"
+                                />
+                              )}
+
+                              {availableTabs.length > 0 ? (
+                                <div className="summary-buttons">
+                                  {availableTabs.map(tab => (
+                                    <button key={tab.id} className="summary-btn has-content" onClick={() => handleOpenSummaryModal(recording, tab.id)}>
+                                      {tab.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="no-summary">Конспекты пока не добавлены</div>
+                              )}
+
+                              {availableTabs.length > 0 && (
+                                <div className="download-text-buttons">
+                                  <span style={{ fontSize: '12px', color: '#6B7280', alignSelf: 'center' }}>
+                                    Скачать конспекты:
+                                  </span>
+                                  {availableTabs.map(tab => {
+                                    const text = getSummaryText(recording, tab.id);
+                                    if (!text) return null;
+                                    return (
+                                      <React.Fragment key={tab.id}>
+                                        <button
+                                          className="btn-download-small"
+                                          onClick={() => downloadTextContent(text, `${recording.title || 'конспект'}_${tab.label}.txt`)}
+                                          style={{ backgroundColor: '#6B7280' }}
+                                        >
+                                          {tab.label} (TXT)
+                                        </button>
+                                        <button
+                                          className="btn-download-small"
+                                          onClick={() => downloadTextAsDoc(text, `${recording.title || 'конспект'}_${tab.label}`)}
+                                          style={{ backgroundColor: '#6B7280' }}
+                                        >
+                                          {tab.label} (DOC)
+                                        </button>
+                                      </React.Fragment>
+                                    );
+                                  })}
+                                </div>
+                              )}
+
+                              <div className="button-group">
+                                <button className="btn-play" onClick={() => handlePlayClick(recording)}>
+                                  {showVideo ? 'Полноэкранный просмотр' : 'Слушать запись'}
+                                </button>
+                                <button className="btn-download" onClick={() => downloadRecording(recording.filePath, recording.title)}>
+                                  Скачать запись
+                                </button>
+                              </div>
+
+                              {recording.materials && recording.materials.length > 0 && (
+                                <div className="materials-section">
+                                  <div className="materials-title">Материалы к лекции ({recording.materials.length}):</div>
+                                  <div className="materials-list-inline">
+                                    {recording.materials.map(material => (
+                                      <div key={material.id} className="material-item-inline">
+                                        <span className="material-icon-small">{getFileIcon(material.fileType)}</span>
+                                        <span className="material-name-inline">{material.originalName}</span>
+                                        <span className="material-size">{formatFileSize(material.fileSize)}</span>
+                                        <button className="btn-download-small" onClick={() => downloadMaterial(material.filePath, material.originalName)}>
+                                          Скачать
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
-                    );
-                  })}
-                </div>
-                
-                {filteredAndSortedRecordings.length > 0 && (
-                  <div style={{ marginTop: '20px', textAlign: 'center', fontSize: '14px', color: '#6B7280' }}>
-                    Найдено записей: {filteredAndSortedRecordings.length}
+                    )}
                   </div>
-                )}
-              </>
+                ))}
+                <div style={{ marginTop: '12px', textAlign: 'center', fontSize: '13px', color: '#6B7280' }}>
+                  Всего записей: {filteredRecordings.length}
+                </div>
+              </div>
             )}
           </div>
         )}

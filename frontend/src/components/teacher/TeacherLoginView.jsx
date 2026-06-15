@@ -8,13 +8,16 @@ const TeacherLoginView = ({
   error,
   loading,
   handleLogin,
-  onBack
+  onBack,
+  onRegister,
+  university
 }) => {
   return (
     <div className="login-container">
       {/* Header */}
       <div className="header">
         <div className="logo-section">
+          <div className="logo"></div>
           <span className="title">ВебРум</span>
         </div>
         <button onClick={onBack} className="back-button">
@@ -32,7 +35,17 @@ const TeacherLoginView = ({
               <span className="badge-role">Преподаватель</span>
             </div>
           </div>
-          
+
+          {university && (
+            <div className="uni-badge">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7B61FF" strokeWidth="2" style={{ flexShrink: 0 }}>
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                <polyline points="9 22 9 12 15 12 15 22"></polyline>
+              </svg>
+              <span>{university.short_name || university.name}</span>
+            </div>
+          )}
+
           <h1 className="welcome-title">С возвращением!</h1>
           <p className="welcome-text">
             Войдите в свой профиль, чтобы продолжить работу
@@ -44,7 +57,7 @@ const TeacherLoginView = ({
           <div className="form-container">
             <h2 className="form-title">Вход в аккаунт</h2>
             <p className="form-subtitle">Введите свои данные для входа</p>
-            
+
             <div className="form-group">
               <label className="form-label">ФИО</label>
               <div className="input-wrapper">
@@ -58,39 +71,47 @@ const TeacherLoginView = ({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   className="input-field"
-                />
-              </div>
-            </div>
-            
-            <div className="form-group">
-              <label className="form-label">Пароль</label>
-              <div className="input-wrapper">
-                <svg className="input-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" strokeWidth="2">
-                  <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
-                  <polyline points="22,6 12,13 2,6"></polyline>
-                </svg>
-                <input
-                  type="email"
-                  placeholder=""
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="input-field"
+                  onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
                 />
               </div>
             </div>
 
-            <button 
+            <div className="form-group">
+              <label className="form-label">Password</label>
+              <div className="input-wrapper">
+               <svg className="input-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" strokeWidth="2">
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                </svg>
+                <input
+                  type="email"
+                  placeholder="Введите пароль"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="input-field"
+                  onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                />
+              </div>
+            </div>
+            <button
               onClick={handleLogin}
               disabled={!name.trim() || !email.trim() || loading}
               className="submit-button"
             >
               {loading ? 'Вход...' : 'Войти в аккаунт'}
             </button>
-            
+
             {error && (
-              <div className="error-message">
-                {error}
-              </div>
+              <div className="error-message">{error}</div>
+            )}
+
+            {onRegister && (
+              <p className="register-link">
+                Нет аккаунта?{' '}
+                <button onClick={onRegister} className="register-btn">
+                  Зарегистрироваться
+                </button>
+              </p>
             )}
           </div>
         </div>
@@ -114,6 +135,12 @@ const TeacherLoginView = ({
           align-items: center;
           gap: 12px;
         }
+        .logo {
+          width: 48px;
+          height: 48px;
+          background-color: #7B61FF;
+          border-radius: 12px;
+        }
         .title {
           font-size: 24px;
           font-weight: 700;
@@ -128,9 +155,7 @@ const TeacherLoginView = ({
           padding: 8px 16px;
           transition: color 0.2s;
         }
-        .back-button:hover {
-          color: #7B61FF;
-        }
+        .back-button:hover { color: #7B61FF; }
         .main-content {
           display: flex;
           min-height: calc(100vh - 88px);
@@ -150,7 +175,7 @@ const TeacherLoginView = ({
           background-color: #fff;
           padding: 12px 24px;
           border-radius: 50px;
-          margin-bottom: 40px;
+          margin-bottom: 16px;
           width: fit-content;
           box-shadow: 0 2px 8px rgba(0,0,0,0.08);
         }
@@ -166,6 +191,19 @@ const TeacherLoginView = ({
           font-size: 16px;
           font-weight: 600;
           color: #000;
+        }
+        .uni-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          background: #ede9ff;
+          color: #5b3fd4;
+          padding: 8px 16px;
+          border-radius: 50px;
+          font-size: 13px;
+          font-weight: 500;
+          margin-bottom: 32px;
+          width: fit-content;
         }
         .welcome-title {
           font-size: 48px;
@@ -267,13 +305,26 @@ const TeacherLoginView = ({
           text-align: center;
           font-size: 14px;
         }
+        .register-link {
+          margin-top: 20px;
+          text-align: center;
+          font-size: 14px;
+          color: #6B7280;
+        }
+        .register-btn {
+          background: none;
+          border: none;
+          color: #7B61FF;
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+          padding: 0;
+          text-decoration: underline;
+        }
+        .register-btn:hover { color: #6750E0; }
         @media (max-width: 968px) {
-          .left-side {
-            display: none;
-          }
-          .right-side {
-            padding: 40px;
-          }
+          .left-side { display: none; }
+          .right-side { padding: 40px; }
         }
       `}</style>
     </div>

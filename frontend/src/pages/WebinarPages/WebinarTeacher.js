@@ -3,11 +3,13 @@ import io from 'socket.io-client';
 import WebinarTeacherView from './WebinarTeacherView';
 import AudioRecorder from '../../components/webinar/AudioRecorder';
 import VideoRecorder from '../../components/webinar/VideoRecorder';
+import useMediasoup from '../../hooks/useMediasoup';
 
 const API_BASE_URL = window.location.hostname.includes('tunnel4.com')
-  ? 'https://4d46289f-50f4-4151-9e9f-4860ddd78a36.tunnel4.com'
-  : 'https://10.78.167.190:3002';
+  ? ''
+  : 'https://192.168.0.20:3002';
 
+const WHISPER_SERVER_URL = 'http://localhost:5000';
 const SOCKET_URL = API_BASE_URL;
 
 const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
@@ -19,8 +21,6 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
   const [studentsForMonitoring, setStudentsForMonitoring] = useState([]);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [localStream, setLocalStream] = useState(null);
-  const [studentScreenStreams, setStudentScreenStreams] = useState(new Map());
-  const [peerConnections, setPeerConnections] = useState(new Map());
   const [isTeacherBroadcasting, setIsTeacherBroadcasting] = useState(false);
   const [activeStudentScreen, setActiveStudentScreen] = useState(null);
   const [pendingScreenRequests, setPendingScreenRequests] = useState([]);
@@ -29,127 +29,210 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
   const [transcriptions, setTranscriptions] = useState({});
   const [transcribing, setTranscribing] = useState({});
   const [editingTranscription, setEditingTranscription] = useState(null);
-  const [liveTranscription, setLiveTranscription] = useState('');
   
-  // Состояния для видео и аудио
   const [isWebcamActive, setIsWebcamActive] = useState(false);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
-  const [studentVideoStreams, setStudentVideoStreams] = useState(new Map());
   const [activeStudentVideo, setActiveStudentVideo] = useState(null);
 
-  // ─── Состояния для трансляции записи ───
   const [isPlaybackBroadcasting, setIsPlaybackBroadcasting] = useState(false);
   const [playbackRecording, setPlaybackRecording] = useState(null);
-  const [playbackState, setPlaybackState] = useState('stopped'); // 'stopped' | 'playing' | 'paused'
+  const [playbackState, setPlaybackState] = useState('stopped');
   const [playbackCurrentTime, setPlaybackCurrentTime] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(0);
-  const playbackVideoRef = useRef(null);   // скрытый <video> для воспроизведения файла
-  const playbackStreamRef = useRef(null);  // captureStream из скрытого video
+  const [playbackSessionId, setPlaybackSessionId] = useState(null);
+  const playbackVideoRef = useRef(null);
+  
+  const [pastMaterials, setPastMaterials] = useState(null);
+  const [showPastMaterials, setShowPastMaterials] = useState(false);
+  const [loadingMaterials, setLoadingMaterials] = useState(false);
+  const [sessionInfo, setSessionInfo] = useState(null);
   
   const messagesEndRef = useRef(null);
   const isMountedRef = useRef(true);
-  const teacherPeerConnectionsRef = useRef(new Map());
-  const teacherVideoConnectionsRef = useRef(new Map());
   const studentVideoRef = useRef(null);
   const teacherVideoRef = useRef(null);
+  const studentScreenVideoRef = useRef(null);
 
   const micStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const webcamRawStreamRef = useRef(null);
   const activeStreamRef = useRef(null);
+  const studentsForMonitoringRef = useRef([]);
 
-  // ─── Включить вебкамеру ───
-  const startTeacherVideo = async () => {
+  const [studentAudioStreams, setStudentAudioStreams] = useState(new Map());
+  const [activeStudentAudio, setActiveStudentAudio] = useState(null);
+  const studentAudioElementsRef = useRef(new Map());
+
+  const mediasoup = useMediasoup(socketRef, sessionId, 'teacher');
+
+  const loadSessionInfo = async () => {
     try {
-      const webcamStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false
-      });
-
-      webcamRawStreamRef.current = webcamStream;
-      const webcamTrack = webcamStream.getVideoTracks()[0];
-
-      if (activeStreamRef.current) {
-        const oldVideoTrack = activeStreamRef.current.getVideoTracks()[0];
-        if (oldVideoTrack) {
-          activeStreamRef.current.removeTrack(oldVideoTrack);
-        }
-        activeStreamRef.current.addTrack(webcamTrack);
-
-        teacherPeerConnectionsRef.current.forEach((pc) => {
-          const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-          if (sender) {
-            sender.replaceTrack(webcamTrack).catch(err =>
-              console.error('replaceTrack webcam error:', err)
-            );
-          }
-        });
-
-        setLocalStream(new MediaStream(activeStreamRef.current.getTracks()));
-      } else {
-        const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
-        micStreamRef.current = mic;
-        const stream = new MediaStream([webcamTrack, ...mic.getAudioTracks()]);
-        activeStreamRef.current = stream;
-        setLocalStream(stream);
-        setIsTeacherBroadcasting(true);
-        _broadcastActiveStreamToStudents();
-      }
-
-      setIsWebcamActive(true);
-      if (socketRef.current) {
-        socketRef.current.emit('teacher_start_video_broadcast', {
-          sessionId, teacherId: teacher.id, teacherName: teacher.name
-        });
-      }
+      const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`);
+      if (!response.ok) throw new Error('Ошибка загрузки сессии');
+      const data = await response.json();
+      setSessionInfo(data);
+      return data;
     } catch (err) {
-      console.error('Ошибка включения камеры:', err);
-      alert('Не удалось получить доступ к камере: ' + err.message);
+      console.error('Ошибка загрузки информации о сессии:', err);
+      return null;
     }
   };
 
-  // ─── Выключить вебкамеру ───
-  const stopTeacherVideo = () => {
-    if (!webcamRawStreamRef.current) return;
+  const kickStudent = (studentSocketId, studentName) => {
+    if (!socketRef.current?.connected) {
+      alert('Нет подключения к вебинару');
+      return;
+    }
+    
+    if (!window.confirm(`Вы уверены, что хотите удалить студента "${studentName}" из вебинара?`)) {
+      return;
+    }
+    
+    socketRef.current.emit('kick_student', {
+      sessionId,
+      studentSocketId,
+      studentName
+    });
+    
+    alert(`Студент "${studentName}" удален из вебинара`);
+  };
 
-    const webcamTrack = webcamRawStreamRef.current.getVideoTracks()[0];
-    if (webcamTrack) webcamTrack.stop();
-    webcamRawStreamRef.current = null;
-
-    if (activeStreamRef.current && screenStreamRef.current) {
-      const oldTrack = activeStreamRef.current.getVideoTracks()[0];
-      if (oldTrack) activeStreamRef.current.removeTrack(oldTrack);
-
-      const screenTrack = screenStreamRef.current.getVideoTracks()[0];
-      if (screenTrack && screenTrack.readyState !== 'ended') {
-        activeStreamRef.current.addTrack(screenTrack);
-
-        teacherPeerConnectionsRef.current.forEach((pc) => {
-          const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-          if (sender) {
-            sender.replaceTrack(screenTrack).catch(err =>
-              console.error('replaceTrack screen error:', err)
-            );
+  const fetchPastMaterials = async () => {
+    if (!sessionId) return;
+    
+    setLoadingMaterials(true);
+    try {
+      let info = sessionInfo;
+      if (!info) {
+        info = await loadSessionInfo();
+      }
+      
+      let allRecordings = [];
+      
+      if (info && info.courseId) {
+        const response = await fetch(`${API_BASE_URL}/api/audio/course/${info.courseId}`);
+        if (response.ok) {
+          const data = await response.json();
+          allRecordings = Array.isArray(data) ? data : [];
+        }
+      }
+      
+      const sessionResponse = await fetch(`${API_BASE_URL}/api/audio/session/${sessionId}`);
+      if (sessionResponse.ok) {
+        const sessionData = await sessionResponse.json();
+        const sessionRecs = Array.isArray(sessionData) ? sessionData : [];
+        const existingIds = new Set(allRecordings.map(r => r.id));
+        for (const rec of sessionRecs) {
+          if (!existingIds.has(rec.id)) {
+            allRecordings.push(rec);
+            existingIds.add(rec.id);
           }
+        }
+      }
+      
+      const recordingsWithMaterials = await Promise.all(
+        allRecordings.map(async (rec) => {
+          try {
+            const mRes = await fetch(`${API_BASE_URL}/api/materials/session/${rec.sessionId}`);
+            const materials = mRes.ok ? await mRes.json() : [];
+            const commentRes = await fetch(`${API_BASE_URL}/api/sessions/${rec.sessionId}/comment`);
+            const comment = commentRes.ok ? (await commentRes.json()).comment : '';
+            return { ...rec, materials, comment };
+          } catch (e) {
+            return { ...rec, materials: [], comment: '' };
+          }
+        })
+      );
+      
+      setPastMaterials({
+        recordings: recordingsWithMaterials,
+        count: recordingsWithMaterials.length
+      });
+    } catch (err) {
+      console.error('Ошибка загрузки материалов курса:', err);
+      setPastMaterials({ recordings: [], count: 0, error: err.message });
+    } finally {
+      setLoadingMaterials(false);
+    }
+  };
+
+  const startTeacherVideo = async () => {
+    try {
+      if (!mediasoup.isReady) {
+        console.log('[Teacher] mediasoup не готов, инициализируем...');
+        await mediasoup.initMediasoup();
+      }
+      if (!mediasoup.isReady) {
+        throw new Error('mediasoup не удалось инициализировать');
+      }
+      
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: { 
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate: 48000
+        }
+      });
+      
+      webcamRawStreamRef.current = stream;
+      setLocalStream(stream);
+      setIsTeacherBroadcasting(true);
+      setIsWebcamActive(true);
+
+      const videoTrack = stream.getVideoTracks()[0];
+      const audioTrack = stream.getAudioTracks()[0];
+
+      if (videoTrack) {
+        await mediasoup.clientRef.current.produce(videoTrack, 'camera', { 
+          role: 'teacher', 
+          type: 'camera',
+          kind: 'video'
+        });
+        console.log('[Teacher] Video track produced');
+      }
+      
+      if (audioTrack) {
+        await mediasoup.clientRef.current.produce(audioTrack, 'mic', { 
+          role: 'teacher', 
+          type: 'mic',
+          kind: 'audio'
+        });
+        console.log('[Teacher] Audio track produced');
+      }
+
+      if (socketRef.current) {
+        socketRef.current.emit('teacher_start_video_broadcast', {
+          sessionId, 
+          teacherId: teacher.id, 
+          teacherName: teacher.name
         });
       }
-      setLocalStream(new MediaStream(activeStreamRef.current.getTracks()));
-    } else if (activeStreamRef.current && !screenStreamRef.current) {
-      activeStreamRef.current.getTracks().forEach(t => t.stop());
-      activeStreamRef.current = null;
+      console.log('[Teacher] Камера и микрофон запущены через mediasoup');
+    } catch (err) {
+      console.error('Ошибка включения камеры:', err);
+      alert('Не удалось получить доступ к камере/микрофону: ' + err.message);
+    }
+  };
+
+  const stopTeacherVideo = async () => {
+    if (mediasoup.clientRef.current) {
+      await mediasoup.clientRef.current.closeProducer('camera');
+      await mediasoup.clientRef.current.closeProducer('mic');
+    }
+    if (webcamRawStreamRef.current) {
+      webcamRawStreamRef.current.getTracks().forEach(t => t.stop());
+      webcamRawStreamRef.current = null;
+    }
+    setIsWebcamActive(false);
+    if (!screenStreamRef.current) {
       setLocalStream(null);
       setIsTeacherBroadcasting(false);
-      teacherPeerConnectionsRef.current.forEach(pc => pc.close());
-      teacherPeerConnectionsRef.current.clear();
-      if (socketRef.current) {
-        socketRef.current.emit('stop_screen_share', { sessionId, streamType: 'teacher_to_all' });
-      }
     }
-
-    setIsWebcamActive(false);
     if (socketRef.current) {
       socketRef.current.emit('teacher_stop_video_broadcast', { sessionId });
     }
+    console.log('[Teacher] Камера остановлена');
   };
 
   const toggleTeacherAudio = () => {
@@ -160,131 +243,113 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
     }
   };
 
-  // ─── Вспомогательная функция: рассылает activeStream студентам ───
-  const _broadcastActiveStreamToStudents = async () => {
-    const stream = activeStreamRef.current;
-    if (!stream) return;
-
-    const studentSocketIds = studentsForMonitoring.map(s => s.socketId);
-
-    for (const studentSocketId of studentSocketIds) {
-      if (teacherPeerConnectionsRef.current.has(studentSocketId)) continue;
-
-      const pc = new RTCPeerConnection({
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-      });
-
-      stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-      const offer = await pc.createOffer({ offerToReceiveVideo: false, offerToReceiveAudio: false });
-      await pc.setLocalDescription(offer);
-
-      if (socketRef.current) {
-        socketRef.current.emit('teacher_send_offer_to_students', {
-          sessionId, studentSocketIds: [studentSocketId], sdp: offer
-        });
-      }
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate && socketRef.current?.connected) {
-          socketRef.current.emit('webrtc_ice_candidate', { to: studentSocketId, candidate: event.candidate });
-        }
-      };
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'failed') console.error('Соединение с ' + studentSocketId + ' не удалось');
-      };
-
-      teacherPeerConnectionsRef.current.set(studentSocketId, pc);
-    }
-
-    if (socketRef.current) {
-      socketRef.current.emit('teacher_start_screen_share', { sessionId, streamType: 'teacher_to_all' });
-    }
-  };
-
-  // ─── ТРАНСЛЯЦИЯ ЗАПИСИ ───────────────────────────────────────────────
-
-  /**
-   * Запускает трансляцию выбранной записи студентам.
-   * Принцип: создаём скрытый <video>, грузим файл, захватываем captureStream(),
-   * кидаем треки через WebRTC точно как при трансляции экрана.
-   */
   const startPlaybackBroadcast = async (recording) => {
     try {
-      // Останавливаем другие трансляции если есть
-      if (isTeacherBroadcasting) stopTeacherScreenShare();
+      if (isTeacherBroadcasting) await stopTeacherScreenShare();
+      if (!mediasoup.isReady) await mediasoup.initMediasoup();
 
       const videoUrl = `${API_BASE_URL}${recording.filePath}`;
 
-      // Создаём или переиспользуем скрытый video-элемент
-      let hiddenVideo = playbackVideoRef.current;
-      if (!hiddenVideo) {
-        hiddenVideo = document.createElement('video');
-        hiddenVideo.style.display = 'none';
-        hiddenVideo.crossOrigin = 'anonymous';
-        document.body.appendChild(hiddenVideo);
-        playbackVideoRef.current = hiddenVideo;
+      let visibleVideo = playbackVideoRef.current;
+      let attempts = 0;
+      while (!visibleVideo && attempts < 20) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        visibleVideo = playbackVideoRef.current;
+        attempts++;
       }
-
+      
+      const hiddenVideo = document.createElement('video');
+      hiddenVideo.style.display = 'none';
+      document.body.appendChild(hiddenVideo);
+      
       hiddenVideo.src = videoUrl;
       hiddenVideo.muted = false;
       hiddenVideo.loop = false;
+      
+      if (visibleVideo) {
+        visibleVideo.src = videoUrl;
+        visibleVideo.muted = false;
+        visibleVideo.loop = false;
+        visibleVideo.controls = true;
+        visibleVideo.style.display = 'block';
+      }
 
-      // Ждём загрузки метаданных
       await new Promise((resolve, reject) => {
-        hiddenVideo.onloadedmetadata = resolve;
+        let loadedCount = 0;
+        const onLoad = () => {
+          loadedCount++;
+          if (loadedCount === (visibleVideo ? 2 : 1)) resolve();
+        };
+        
+        hiddenVideo.onloadedmetadata = onLoad;
         hiddenVideo.onerror = () => reject(new Error('Не удалось загрузить файл записи'));
         hiddenVideo.load();
+        
+        if (visibleVideo) {
+          visibleVideo.onloadedmetadata = onLoad;
+          visibleVideo.onerror = () => reject(new Error('Не удалось загрузить файл записи'));
+          visibleVideo.load();
+        }
       });
 
       setPlaybackDuration(hiddenVideo.duration);
-
-      // Захватываем поток из video
-      const capturedStream = hiddenVideo.captureStream
-        ? hiddenVideo.captureStream()
-        : hiddenVideo.mozCaptureStream
-          ? hiddenVideo.mozCaptureStream()
-          : null;
-
-      if (!capturedStream) {
-        throw new Error('captureStream не поддерживается в этом браузере');
+      
+      await hiddenVideo.play();
+      if (visibleVideo) {
+        await visibleVideo.play();
       }
 
-      playbackStreamRef.current = capturedStream;
-      activeStreamRef.current = capturedStream;
+      await mediasoup.startPlaybackBroadcast(hiddenVideo);
 
-      // Показываем в teacherVideoRef как превью
-      setLocalStream(new MediaStream(capturedStream.getTracks()));
       setIsTeacherBroadcasting(true);
       setIsPlaybackBroadcasting(true);
       setPlaybackRecording(recording);
       setPlaybackState('playing');
+      setPlaybackSessionId(recording.sessionId);
 
-      // Рассылаем студентам
-      await _broadcastActiveStreamToStudents();
+      if (socketRef.current) {
+        socketRef.current.emit('teacher_start_playback_broadcast', {
+          sessionId,
+          recordingSessionId: recording.sessionId,
+          recordingTitle: recording.title || recording.courseTitle || 'Запись занятия',
+          recordingId: recording.id,
+          recordingType: recording.type
+        });
+      }
 
-      // Запускаем воспроизведение
-      await hiddenVideo.play();
+      if (visibleVideo) {
+        visibleVideo.ontimeupdate = () => {
+          setPlaybackCurrentTime(visibleVideo.currentTime);
+          if (Math.abs(hiddenVideo.currentTime - visibleVideo.currentTime) > 0.5) {
+            hiddenVideo.currentTime = visibleVideo.currentTime;
+          }
+        };
+        
+        visibleVideo.onended = () => {
+          setPlaybackState('stopped');
+          setPlaybackCurrentTime(0);
+          hiddenVideo.pause();
+        };
+      } else {
+        hiddenVideo.ontimeupdate = () => {
+          setPlaybackCurrentTime(hiddenVideo.currentTime);
+        };
+      }
 
-      // Обновляем текущее время
-      hiddenVideo.ontimeupdate = () => {
-        setPlaybackCurrentTime(hiddenVideo.currentTime);
-      };
-
-      // Конец записи
       hiddenVideo.onended = () => {
         setPlaybackState('stopped');
         setPlaybackCurrentTime(0);
+        if (visibleVideo) visibleVideo.pause();
       };
+
+      window.__hiddenPlaybackVideo = hiddenVideo;
 
     } catch (err) {
       console.error('Ошибка запуска трансляции записи:', err);
       alert('Не удалось начать трансляцию записи: ' + err.message);
       setIsPlaybackBroadcasting(false);
       setPlaybackState('stopped');
+      setPlaybackSessionId(null);
     }
   };
 
@@ -293,12 +358,18 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       playbackVideoRef.current.pause();
       setPlaybackState('paused');
     }
+    if (window.__hiddenPlaybackVideo) {
+      window.__hiddenPlaybackVideo.pause();
+    }
   };
 
   const resumePlaybackBroadcast = () => {
     if (playbackVideoRef.current) {
       playbackVideoRef.current.play().catch(console.error);
       setPlaybackState('playing');
+    }
+    if (window.__hiddenPlaybackVideo) {
+      window.__hiddenPlaybackVideo.play().catch(console.error);
     }
   };
 
@@ -307,24 +378,30 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       playbackVideoRef.current.currentTime = timeSeconds;
       setPlaybackCurrentTime(timeSeconds);
     }
+    if (window.__hiddenPlaybackVideo) {
+      window.__hiddenPlaybackVideo.currentTime = timeSeconds;
+    }
   };
 
-  const stopPlaybackBroadcast = () => {
-    if (playbackVideoRef.current) {
-      playbackVideoRef.current.pause();
-      playbackVideoRef.current.src = '';
-      playbackVideoRef.current.ontimeupdate = null;
-      playbackVideoRef.current.onended = null;
+  const stopPlaybackBroadcast = async () => {
+    const visibleVideo = playbackVideoRef.current;
+    if (visibleVideo) {
+      visibleVideo.pause();
+      visibleVideo.src = '';
+      visibleVideo.ontimeupdate = null;
+      visibleVideo.onended = null;
+    }
+    
+    if (window.__hiddenPlaybackVideo) {
+      window.__hiddenPlaybackVideo.pause();
+      window.__hiddenPlaybackVideo.src = '';
+      if (window.__hiddenPlaybackVideo.parentNode) {
+        window.__hiddenPlaybackVideo.parentNode.removeChild(window.__hiddenPlaybackVideo);
+      }
+      window.__hiddenPlaybackVideo = null;
     }
 
-    playbackStreamRef.current = null;
-
-    // Останавливаем WebRTC трансляцию
-    activeStreamRef.current?.getTracks().forEach(t => t.stop());
-    activeStreamRef.current = null;
-
-    teacherPeerConnectionsRef.current.forEach(pc => pc.close());
-    teacherPeerConnectionsRef.current.clear();
+    await mediasoup.stopPlaybackBroadcast();
 
     setLocalStream(null);
     setIsTeacherBroadcasting(false);
@@ -332,179 +409,113 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
     setPlaybackRecording(null);
     setPlaybackState('stopped');
     setPlaybackCurrentTime(0);
+    setPlaybackSessionId(null);
 
     if (socketRef.current) {
       socketRef.current.emit('stop_screen_share', { sessionId, streamType: 'teacher_to_all' });
+      socketRef.current.emit('teacher_stop_playback_broadcast', { sessionId });
     }
   };
 
-  // ────────────────────────────────────────────────────────────────────
-
-  const handleStudentVideoOffer = async ({ from, sdp }) => {
-    console.log('Получен видео оффер от студента', from);
-    
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-    });
-    
-    pc.ontrack = (event) => {
-      console.log('Получен видео/аудио трек от студента', from);
-      if (event.streams && event.streams[0]) {
-        setStudentVideoStreams(prev => {
-          const newMap = new Map(prev);
-          newMap.set(from, event.streams[0]);
-          return newMap;
-        });
-        
-        const student = studentsForMonitoring.find(s => s.socketId === from);
-        if (student) {
-          setActiveStudentVideo({
-            studentSocketId: from,
-            studentName: student.userName
-          });
-        }
-      }
-    };
-    
-    pc.onicecandidate = (event) => {
-      if (event.candidate && socketRef.current?.connected) {
-        socketRef.current.emit('webrtc_ice_candidate', {
-          to: from,
-          candidate: event.candidate
-        });
-      }
-    };
-    
-    try {
-      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      
-      if (socketRef.current) {
-        socketRef.current.emit('webrtc_answer', { to: from, sdp: answer });
-      }
-      
-      setPeerConnections(prev => {
-        const newMap = new Map(prev);
-        newMap.set(from, pc);
-        return newMap;
-      });
-    } catch (err) {
-      console.error('Ошибка обработки видео оффера студента:', err);
-    }
-  };
-
-  const handleStudentVideoStopped = ({ studentSocketId }) => {
-    console.log('Студент выключил видео', studentSocketId);
-    setStudentVideoStreams(prev => {
-      const newMap = new Map(prev);
-      newMap.delete(studentSocketId);
-      return newMap;
-    });
-    
-    if (activeStudentVideo?.studentSocketId === studentSocketId) {
-      setActiveStudentVideo(null);
-    }
-    
-    const pc = peerConnections.get(studentSocketId);
-    if (pc) {
-      pc.close();
-      setPeerConnections(prev => {
-        const newMap = new Map(prev);
-        newMap.delete(studentSocketId);
-        return newMap;
-      });
-    }
-  };
-
-  const handleStudentAudioToggle = ({ studentSocketId, enabled }) => {
-    console.log(`Студент ${studentSocketId} ${enabled ? 'включил' : 'выключил'} звук`);
-  };
-
-  // ─── Трансляция экрана ───
   const startTeacherScreenShare = async () => {
     try {
-      const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-      const micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      if (!mediasoup.isReady) {
+        console.log('[Teacher] mediasoup не готов, инициализируем...');
+        await mediasoup.initMediasoup();
+      }
+      if (!mediasoup.isReady) {
+        throw new Error('mediasoup не удалось инициализировать');
+      }
+      
+      const stream = await navigator.mediaDevices.getDisplayMedia({ 
+        video: true, 
+        audio: true
       });
-
+      
+      const micStream = await navigator.mediaDevices.getUserMedia({ 
+        audio: { 
+          echoCancellation: true, 
+          noiseSuppression: true 
+        } 
+      });
+      
       micStreamRef.current = micStream;
-      screenStreamRef.current = screenStream;
+      screenStreamRef.current = stream;
 
-      if (activeStreamRef.current) {
-        const oldVideo = activeStreamRef.current.getVideoTracks()[0];
-        if (oldVideo) activeStreamRef.current.removeTrack(oldVideo);
-        activeStreamRef.current.addTrack(screenStream.getVideoTracks()[0]);
+      const combinedStream = new MediaStream([
+        ...stream.getVideoTracks(), 
+        ...micStream.getAudioTracks()
+      ]);
+      setLocalStream(combinedStream);
+      setIsTeacherBroadcasting(true);
 
-        const oldAudio = activeStreamRef.current.getAudioTracks()[0];
-        if (oldAudio) activeStreamRef.current.removeTrack(oldAudio);
-        activeStreamRef.current.addTrack(micStream.getAudioTracks()[0]);
-
-        teacherPeerConnectionsRef.current.forEach((pc) => {
-          const videoSender = pc.getSenders().find(s => s.track?.kind === 'video');
-          const audioSender = pc.getSenders().find(s => s.track?.kind === 'audio');
-          if (videoSender) videoSender.replaceTrack(screenStream.getVideoTracks()[0]).catch(console.error);
-          if (audioSender) audioSender.replaceTrack(micStream.getAudioTracks()[0]).catch(console.error);
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        await mediasoup.clientRef.current.produce(videoTrack, 'screen', { 
+          role: 'teacher', 
+          type: 'screen', 
+          target: 'all',
+          kind: 'video'
         });
-
-        setLocalStream(new MediaStream(activeStreamRef.current.getTracks()));
-      } else {
-        const combined = new MediaStream([
-          ...screenStream.getVideoTracks(),
-          ...micStream.getAudioTracks()
-        ]);
-        activeStreamRef.current = combined;
-        setLocalStream(combined);
-        setIsTeacherBroadcasting(true);
-        await _broadcastActiveStreamToStudents();
+        videoTrack.onended = () => stopTeacherScreenShare();
+        console.log('[Teacher] Screen video track produced');
+      }
+      
+      const micTrack = micStream.getAudioTracks()[0];
+      if (micTrack) {
+        await mediasoup.clientRef.current.produce(micTrack, 'mic', { 
+          role: 'teacher', 
+          type: 'mic',
+          kind: 'audio'
+        });
+        console.log('[Teacher] Mic audio track produced');
+      }
+      
+      const screenAudioTrack = stream.getAudioTracks()[0];
+      if (screenAudioTrack) {
+        await mediasoup.clientRef.current.produce(screenAudioTrack, 'screen-audio', { 
+          role: 'teacher', 
+          type: 'screen-audio', 
+          target: 'all',
+          kind: 'audio'
+        });
+        console.log('[Teacher] Screen audio track produced');
       }
 
-      screenStream.getVideoTracks()[0].onended = () => stopTeacherScreenShare();
-
+      if (socketRef.current) {
+        socketRef.current.emit('teacher_start_screen_share', { 
+          sessionId, 
+          streamType: 'teacher_to_all' 
+        });
+      }
+      console.log('[Teacher] Экран запущен через mediasoup');
     } catch (err) {
       console.error('Не удалось начать трансляцию:', err);
-      alert('Не удалось получить доступ к экрану');
+      alert('Не удалось получить доступ к экрану: ' + err.message);
       setIsTeacherBroadcasting(false);
     }
   };
 
-  const stopTeacherScreenShare = () => {
-    micStreamRef.current?.getTracks().forEach(t => t.stop());
-    micStreamRef.current = null;
-    screenStreamRef.current?.getTracks().forEach(t => t.stop());
-    screenStreamRef.current = null;
-
-    if (isWebcamActive && webcamRawStreamRef.current) {
-      const webcamTrack = webcamRawStreamRef.current.getVideoTracks()[0];
-      if (webcamTrack && webcamTrack.readyState !== 'ended') {
-        if (activeStreamRef.current) {
-          const oldVideo = activeStreamRef.current.getVideoTracks()[0];
-          if (oldVideo) activeStreamRef.current.removeTrack(oldVideo);
-          activeStreamRef.current.addTrack(webcamTrack);
-
-          teacherPeerConnectionsRef.current.forEach((pc) => {
-            const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-            if (sender) sender.replaceTrack(webcamTrack).catch(console.error);
-          });
-          setLocalStream(new MediaStream(activeStreamRef.current.getTracks()));
-        }
-        return;
-      }
+  const stopTeacherScreenShare = async () => {
+    if (mediasoup.clientRef.current) {
+      await mediasoup.clientRef.current.closeProducer('screen');
+      await mediasoup.clientRef.current.closeProducer('screen-audio');
+      await mediasoup.clientRef.current.closeProducer('mic');
     }
-
-    activeStreamRef.current?.getTracks().forEach(t => t.stop());
-    activeStreamRef.current = null;
-
-    teacherPeerConnectionsRef.current.forEach((pc) => pc.close());
-    teacherPeerConnectionsRef.current.clear();
-
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(t => t.stop());
+      screenStreamRef.current = null;
+    }
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach(t => t.stop());
+      micStreamRef.current = null;
+    }
     setLocalStream(null);
     setIsTeacherBroadcasting(false);
-
     if (socketRef.current) {
       socketRef.current.emit('stop_screen_share', { sessionId, streamType: 'teacher_to_all' });
     }
+    console.log('[Teacher] Экран остановлен');
   };
 
   const requestStudentScreen = async (studentSocketId, studentName) => {
@@ -519,7 +530,8 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
 
     socketRef.current.emit('teacher_request_student_screen', {
       sessionId,
-      studentSocketId
+      studentSocketId,
+      studentName
     });
 
     setActiveStudentScreen({
@@ -537,153 +549,44 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
 
   const stopWatchingStudentScreen = () => {
     if (activeStudentScreen) {
-      socketRef.current.emit('stop_screen_share', {
-        sessionId,
-        streamType: 'student_screen_share',
-        targetSocketId: activeStudentScreen.studentSocketId
-      });
-
-      const pc = peerConnections.get(activeStudentScreen.studentSocketId);
-      if (pc) {
-        pc.close();
-        setPeerConnections(prev => {
-          const newMap = new Map(prev);
-          newMap.delete(activeStudentScreen.studentSocketId);
-          return newMap;
+      if (mediasoup.clientRef.current) {
+        mediasoup.clientRef.current.closeProducer(`student_screen_${activeStudentScreen.studentSocketId}`);
+        mediasoup.clientRef.current.closeProducer(`student_screen_audio_${activeStudentScreen.studentSocketId}`);
+      }
+      
+      if (socketRef.current) {
+        socketRef.current.emit('stop_watching_student_screen', {
+          sessionId,
+          studentSocketId: activeStudentScreen.studentSocketId
         });
       }
-
-      setStudentScreenStreams(prev => {
-        const newMap = new Map(prev);
-        newMap.delete(activeStudentScreen.studentSocketId);
-        return newMap;
-      });
 
       setActiveStudentScreen(null);
     }
   };
 
+  const handleStudentScreenShareStarted = async ({ studentSocketId, studentName }) => {
+    console.log(`[Teacher] Student ${studentName} started screen share`);
+  };
+
   const handleStudentScreenShareStopped = ({ studentSocketId }) => {
-    setStudentScreenStreams(prev => {
-      const newMap = new Map(prev);
-      newMap.delete(studentSocketId);
-      return newMap;
-    });
-    setActiveStudentScreen(null);
-
-    const pc = peerConnections.get(studentSocketId);
-    if (pc) {
-      pc.close();
-      setPeerConnections(prev => {
-        const newMap = new Map(prev);
-        newMap.delete(studentSocketId);
-        return newMap;
-      });
+    console.log(`[Teacher] Student ${studentSocketId} stopped screen share`);
+    if (activeStudentScreen?.studentSocketId === studentSocketId) {
+      setActiveStudentScreen(null);
     }
   };
 
-  const handleWebrtcAnswer = async ({ from, sdp }) => {
-    const pc = teacherPeerConnectionsRef.current.get(from);
-    if (pc && pc.signalingState !== 'closed') {
-      try {
-        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-      } catch (err) {
-        console.error('Ошибка установки remote description:', err);
-      }
-    }
-    
-    const videoPc = teacherVideoConnectionsRef.current.get(from);
-    if (videoPc && videoPc.signalingState !== 'closed') {
-      try {
-        await videoPc.setRemoteDescription(new RTCSessionDescription(sdp));
-      } catch (err) {
-        console.error('Ошибка установки remote description для видео:', err);
-      }
-    }
-  };
-
-  const handleWebrtcIceCandidate = ({ from, candidate }) => {
-    const pc = teacherPeerConnectionsRef.current.get(from);
-    if (pc && candidate) {
-      try {
-        pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (err) {
-        console.error('Ошибка добавления ICE кандидата:', err);
-      }
-    }
-    
-    const videoPc = teacherVideoConnectionsRef.current.get(from);
-    if (videoPc && candidate) {
-      try {
-        videoPc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (err) {
-        console.error('Ошибка добавления ICE кандидата для видео:', err);
-      }
-    }
-  };
-
-  const handleStudentWebrtcOffer = async ({ from, sdp, streamType }) => {
-    if (streamType === 'student_to_teacher') {
-      console.log('Получен оффер от студента ' + from);
-
-      const pc = new RTCPeerConnection();
-
-      pc.ontrack = (event) => {
-        console.log('Получен трек от студента ' + from, event.streams);
-        if (event.streams && event.streams[0]) {
-          console.log('Поток студента ' + from + ' готов');
-          setStudentScreenStreams(prev => {
-            const newMap = new Map(prev);
-            newMap.set(from, event.streams[0]);
-            return newMap;
-          });
-
-          setPendingScreenRequests(prev => 
-            prev.filter(req => req.studentSocketId !== from)
-          );
-        }
-      };
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate && socketRef.current?.connected) {
-          socketRef.current.emit('webrtc_ice_candidate', { to: from, candidate: event.candidate });
-        }
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'connected') {
-          console.log('СОЕДИНЕНИЕ С ' + from + ' УСТАНОВЛЕНО!');
-        } else if (pc.connectionState === 'failed') {
-          console.error('СОЕДИНЕНИЕ С ' + from + ' НЕ УДАЛОСЬ!');
-        }
-      };
-
-      pc.oniceconnectionstatechange = () => {
-        console.log('ICE состояние с ' + from + ':', pc.iceConnectionState);
-      };
-
-      try {
-        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-        console.log('Remote description установлен для ' + from);
-        
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        console.log('Answer создан для ' + from);
-         
-        if (socketRef.current) {
-          socketRef.current.emit('webrtc_answer', { to: from, sdp: answer });
-        }
-
-        setPeerConnections(prev => {
-          const newMap = new Map(prev);
-          newMap.set(from, pc);
-          return newMap;
+  const handleStudentRequestRecordingMaterials = ({ recordingSessionId, studentSocketId }) => {
+    if (socketRef.current && pastMaterials?.recordings) {
+      const recording = pastMaterials.recordings.find(r => r.sessionId === recordingSessionId);
+      if (recording) {
+        socketRef.current.emit('recording_materials_response', {
+          sessionId,
+          studentSocketId,
+          recordingSessionId,
+          materials: recording.materials || [],
+          comment: recording.comment || ''
         });
-        
-        console.log('Соединение с ' + from + ' готово');
-      } catch (err) {
-        console.error('Ошибка обработки оффера студента ' + from + ':', err);
-        pc.close();
       }
     }
   };
@@ -714,6 +617,106 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       });
   };
 
+  const transcribeRecording = async (recordingId) => {
+    if (transcribing[recordingId]) return;
+    
+    try {
+      setTranscribing(prev => ({ ...prev, [recordingId]: true }));
+      
+      const recording = [...recordings, ...videoRecordings].find(r => r.id === recordingId);
+      if (!recording) throw new Error('Запись не найдена');
+      
+      const audioResponse = await fetch(`${API_BASE_URL}${recording.filePath}`);
+      const audioBlob = await audioResponse.blob();
+      
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.webm');
+      formData.append('format_output', 'true');
+      
+      const whisperResponse = await fetch(`${WHISPER_SERVER_URL}/transcribe`, {
+        method: 'POST',
+        body: formData
+      });
+      
+      const result = await whisperResponse.json();
+      
+      if (result.error) {
+        throw new Error(result.error);
+      }
+      
+      const saveResponse = await fetch(`${API_BASE_URL}/api/audio/${recordingId}/transcription`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          text: result.text,
+          raw_text: result.raw_text,
+          pauses_found: result.pauses_found,
+          speech_analysis: result.speech_analysis,
+          processing_time: result.processing_time
+        })
+      });
+      
+      if (!saveResponse.ok) throw new Error('Ошибка сохранения');
+      
+      setTranscriptions(prev => ({
+        ...prev,
+        [recordingId]: result.text
+      }));
+      
+      fetchRecordings();
+      
+      const analysis = result.speech_analysis;
+      const message = `Транскрипция готова\nАнализ:\nТип речи: ${analysis?.structure_type || 'не определен'}\nПауз найдено: ${result.pauses_found}\nТемп речи: ${Math.round(analysis?.speech_pace || 0)} слов/мин\nДлительность: ${Math.round(analysis?.total_duration || 0)}с\n\nТекст разбит на ${result.text.split('\n\n').length} абзацев`;
+      
+      alert(message);
+      
+    } catch (err) {
+      console.error('Ошибка транскрибирования:', err);
+      alert('Ошибка при транскрибации: ' + err.message);
+    } finally {
+      setTranscribing(prev => ({ ...prev, [recordingId]: false }));
+    }
+  };
+
+  const generateAISummary = async (recordingId, action = 'summary') => {
+    const recording = [...recordings, ...videoRecordings].find(r => r.id === recordingId);
+    if (!recording || !recording.transcription) {
+      alert('Сначала выполните транскрипцию');
+      return;
+    }
+    
+    try {
+      const response = await fetch(`${WHISPER_SERVER_URL}/summarize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: recording.transcription,
+          action: action
+        })
+      });
+      
+      const result = await response.json();
+      
+      if (result.success) {
+        await fetch(`${API_BASE_URL}/api/audio/${recordingId}/ai-summary`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            [action === 'summary' ? 'aiSummary' : action === 'bullet_points' ? 'aiBulletPoints' : 'aiStructure']: result.summary 
+          })
+        });
+        
+        alert('AI конспект готов');
+        fetchRecordings();
+      } else {
+        alert('Ошибка: ' + result.error);
+      }
+    } catch (err) {
+      console.error('Ошибка генерации конспекта:', err);
+      alert('Ошибка подключения к AI серверу');
+    }
+  };
+
   const handleOpenTranscriptionEditor = (recordingId) => {
     setEditingTranscription(recordingId);
   };
@@ -731,9 +734,7 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
     handleCloseTranscriptionEditor();
   };
 
-  const handleTranscriptionUpdate = (text) => {
-    setLiveTranscription(text);
-  };
+  const handleTranscriptionUpdate = (text) => {};
 
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -776,44 +777,6 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
     }
   };
 
-  const transcribeRecording = async (recordingId) => {
-    if (transcribing[recordingId]) return;
-    try {
-      setTranscribing(prev => ({ ...prev, [recordingId]: true }));
-
-      const response = await fetch(`${API_BASE_URL}/api/audio/${recordingId}/transcribe`, {
-        method: 'POST'
-      });
-
-      const result = await response.json();
-
-      if (result.success) {
-        setTranscriptions(prev => ({
-          ...prev,
-          [recordingId]: result.text
-        }));
-        
-        const updatedRecordings = [...recordings, ...videoRecordings].map(rec => 
-          rec.id === recordingId 
-            ? { ...rec, transcription: result.text }
-            : rec
-        );
-        
-        setRecordings(updatedRecordings.filter(r => r.type !== 'video'));
-        setVideoRecordings(updatedRecordings.filter(r => r.type === 'video'));
-        
-        alert('Транскрипция готова! Слов: ' + (result.wordCount || 'неизвестно'));
-      } else {
-        alert('Ошибка: ' + (result.error || 'неизвестно'));
-      }
-    } catch (err) {
-      console.error('Ошибка транскрибирования:', err);
-      alert('Не удалось подключиться к сервису транскрибирования');
-    } finally {
-      setTranscribing(prev => ({ ...prev, [recordingId]: false }));
-    }
-  };
-
   const sendMessage = () => {
     if (!newMessage.trim() || !socketRef.current?.connected) return;
     socketRef.current.emit('send_message', {
@@ -839,7 +802,9 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
 
   const handleParticipantsList = (list) => {
     setParticipants(list);
-    setStudentsForMonitoring(list.filter(p => p.userType === 'student'));
+    const students = list.filter(p => p.userType === 'student');
+    setStudentsForMonitoring(students);
+    studentsForMonitoringRef.current = students;
   };
 
   const handleUserJoined = (user) => {
@@ -861,74 +826,120 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
     if (user.userType === 'student') {
       setStudentsForMonitoring(prev => {
         const exists = prev.some(s => s.userId === user.userId);
+        let next;
         if (exists) {
-          return prev.map(s => s.userId === user.userId ? user : s);
+          next = prev.map(s => s.userId === user.userId ? user : s);
         } else {
-          return [...prev, user];
+          next = [...prev, user];
         }
+        studentsForMonitoringRef.current = next;
+        return next;
       });
-      
-      if (isTeacherBroadcasting && activeStreamRef.current) {
-        const establishConnection = async () => {
-          const stream = activeStreamRef.current;
-          const pc = new RTCPeerConnection({
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-          });
-
-          stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-          const offer = await pc.createOffer({ offerToReceiveVideo: false, offerToReceiveAudio: false });
-          await pc.setLocalDescription(offer);
-
-          if (socketRef.current) {
-            socketRef.current.emit('teacher_send_offer_to_students', {
-              sessionId, studentSocketIds: [user.socketId], sdp: offer
-            });
-          }
-
-          pc.onicecandidate = (event) => {
-            if (event.candidate && socketRef.current?.connected) {
-              socketRef.current.emit('webrtc_ice_candidate', { to: user.socketId, candidate: event.candidate });
-            }
-          };
-
-          teacherPeerConnectionsRef.current.set(user.socketId, pc);
-        };
-        establishConnection().catch(console.error);
-      }
     }
   };
 
   const handleUserLeft = (user) => {
     setParticipants(prev => prev.filter(p => p.socketId !== user.socketId));
     if (user.userType === 'student') {
-      setStudentsForMonitoring(prev => prev.filter(s => s.socketId !== user.socketId));
+      setStudentsForMonitoring(prev => {
+        const next = prev.filter(s => s.socketId !== user.socketId);
+        studentsForMonitoringRef.current = next;
+        return next;
+      });
       if (activeStudentScreen?.studentSocketId === user.socketId) {
         setActiveStudentScreen(null);
-        setStudentScreenStreams(prev => {
-          const newMap = new Map(prev);
-          newMap.delete(user.socketId);
-          return newMap;
-        });
       }
-      const videoPc = teacherVideoConnectionsRef.current.get(user.socketId);
-      if (videoPc) {
-        videoPc.close();
-        teacherVideoConnectionsRef.current.delete(user.socketId);
-      }
-      setStudentVideoStreams(prev => {
+      setStudentAudioStreams(prev => {
         const newMap = new Map(prev);
         newMap.delete(user.socketId);
         return newMap;
       });
+      const audioEl = studentAudioElementsRef.current.get(user.socketId);
+      if (audioEl) {
+        audioEl.pause();
+        audioEl.srcObject = null;
+        audioEl.remove();
+        studentAudioElementsRef.current.delete(user.socketId);
+      }
     }
   };
 
   useEffect(() => {
+    if (!mediasoup.isReady) return;
+
+    console.log('[Teacher] remoteStreams size:', mediasoup.remoteStreams.size);
+    
+    for (const [producerId, entry] of mediasoup.remoteStreams) {
+      const ad = entry.appData || {};
+      console.log(`[Teacher] Remote track: producerId=${producerId}, kind=${entry.kind}, type=${ad.type}, role=${ad.role}, studentId=${ad.studentId}`);
+      
+      if (ad.role === 'student' && ad.type === 'mic' && entry.kind === 'audio') {
+        const studentId = ad.studentId || ad.socketId;
+        console.log(`[Teacher] Got student mic audio from ${ad.studentName}, creating audio element`);
+        
+        let audioEl = studentAudioElementsRef.current.get(studentId);
+        if (!audioEl) {
+          audioEl = document.createElement('audio');
+          audioEl.autoplay = true;
+          audioEl.style.display = 'none';
+          document.body.appendChild(audioEl);
+          studentAudioElementsRef.current.set(studentId, audioEl);
+        }
+        
+        if (audioEl.srcObject !== entry.stream) {
+          audioEl.srcObject = entry.stream;
+          audioEl.play().catch(e => console.warn('Error playing student audio:', e));
+        }
+        
+        setStudentAudioStreams(prev => {
+          const newMap = new Map(prev);
+          newMap.set(studentId, {
+            stream: entry.stream,
+            studentName: ad.studentName,
+            studentId: studentId
+          });
+          return newMap;
+        });
+      }
+      
+      if (ad.role === 'student' && ad.type === 'screen' && entry.kind === 'video') {
+        console.log(`[Teacher] Got student screen video from ${ad.studentName}`);
+        if (studentScreenVideoRef.current) {
+          studentScreenVideoRef.current.srcObject = entry.stream;
+          studentScreenVideoRef.current.play().catch(console.error);
+        }
+      }
+      
+      if (ad.role === 'student' && ad.type === 'screen-audio' && entry.kind === 'audio') {
+        console.log(`[Teacher] Got student screen audio from ${ad.studentName}`);
+        if (studentScreenVideoRef.current && studentScreenVideoRef.current.srcObject) {
+          const existingStream = studentScreenVideoRef.current.srcObject;
+          const audioTrack = entry.stream.getAudioTracks()[0];
+          if (audioTrack && !existingStream.getAudioTracks().some(t => t.id === audioTrack.id)) {
+            existingStream.addTrack(audioTrack);
+            console.log('[Teacher] Added screen audio to student screen stream');
+          }
+        }
+      }
+    }
+    
+    return () => {
+      for (const [id, audioEl] of studentAudioElementsRef.current) {
+        if (audioEl) {
+          audioEl.pause();
+          audioEl.srcObject = null;
+          audioEl.remove();
+        }
+      }
+      studentAudioElementsRef.current.clear();
+    };
+  }, [mediasoup.remoteStreams, mediasoup.isReady]);
+
+  useEffect(() => {
     isMountedRef.current = true;
+    
+    loadSessionInfo();
+    
     const newSocket = io(SOCKET_URL, {
       transports: ['websocket', 'polling'],
       reconnection: true,
@@ -950,11 +961,24 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
         userName: teacher.name
       });
 
+      const sessionUrl = `${window.location.origin}/session/${sessionId}`;
+      fetch(`${API_BASE_URL}/api/sessions/${sessionId}/link`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: sessionUrl, teacherId: teacher.id })
+      }).catch(err => console.warn('Не удалось сохранить ссылку на сессию:', err));
+
       setTimeout(() => {
         if (socketRef.current?.connected) {
           socketRef.current.emit('get_participants_list', { sessionId });
         }
       }, 500);
+
+      setTimeout(() => {
+        if (socketRef.current?.connected) {
+          mediasoup.initMediasoup().catch(err => console.warn('mediasoup init failed:', err.message));
+        }
+      }, 1000);
     });
 
     newSocket.on('disconnect', () => {
@@ -966,6 +990,13 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       if (!isMountedRef.current) return;
       setConnectionStatus('error');
     });
+
+    newSocket.on('student_screen_share_started', handleStudentScreenShareStarted);
+    newSocket.on('student_screen_share_stopped', handleStudentScreenShareStopped);
+    newSocket.on('student_audio_toggle', ({ studentSocketId, enabled }) => {
+      console.log(`Student ${studentSocketId} ${enabled ? 'enabled' : 'disabled'} audio`);
+    });
+    newSocket.on('student_request_recording_materials', handleStudentRequestRecordingMaterials);
 
     fetch(`${API_BASE_URL}/api/messages/${sessionId}`)
       .then(res => res.json())
@@ -980,6 +1011,7 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
 
     return () => {
       isMountedRef.current = false;
+      mediasoup.cleanup();
       if (socketRef.current?.connected) {
         socketRef.current.emit('leave_webinar', { sessionId });
         socketRef.current.disconnect();
@@ -987,14 +1019,17 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       stopTeacherScreenShare();
       stopTeacherVideo();
       stopWatchingStudentScreen();
-      // Очищаем скрытый video-элемент при размонтировании
       if (playbackVideoRef.current) {
         playbackVideoRef.current.pause();
         playbackVideoRef.current.src = '';
-        if (playbackVideoRef.current.parentNode) {
-          playbackVideoRef.current.parentNode.removeChild(playbackVideoRef.current);
+      }
+      if (window.__hiddenPlaybackVideo) {
+        window.__hiddenPlaybackVideo.pause();
+        window.__hiddenPlaybackVideo.src = '';
+        if (window.__hiddenPlaybackVideo.parentNode) {
+          window.__hiddenPlaybackVideo.parentNode.removeChild(window.__hiddenPlaybackVideo);
         }
-        playbackVideoRef.current = null;
+        window.__hiddenPlaybackVideo = null;
       }
     };
   }, [sessionId, teacher.id, teacher.name]);
@@ -1027,38 +1062,24 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       }
     };
 
-    socketRef.current.on('student_screen_share_stopped', handleStudentScreenShareStopped);
-    socketRef.current.on('webrtc_answer', handleWebrtcAnswer);
-    socketRef.current.on('webrtc_ice_candidate', handleWebrtcIceCandidate);
-    socketRef.current.on('student_webrtc_offer', handleStudentWebrtcOffer);
     socketRef.current.on('new_message', handleNewMessage);
     socketRef.current.on('participants_list', handleParticipantsList);
     socketRef.current.on('user_joined', handleUserJoined);
     socketRef.current.on('user_left', handleUserLeft);
     socketRef.current.on('audio_recording_added', handleAudioRecordingAdded);
     socketRef.current.on('video_recording_added', handleVideoRecordingAdded);
-    socketRef.current.on('student_video_offer', handleStudentVideoOffer);
-    socketRef.current.on('student_video_stopped', handleStudentVideoStopped);
-    socketRef.current.on('student_audio_toggle', handleStudentAudioToggle);
 
     return () => {
       if (socketRef.current) {
-        socketRef.current.off('student_screen_share_stopped', handleStudentScreenShareStopped);
-        socketRef.current.off('webrtc_answer', handleWebrtcAnswer);
-        socketRef.current.off('webrtc_ice_candidate', handleWebrtcIceCandidate);
-        socketRef.current.off('student_webrtc_offer', handleStudentWebrtcOffer);
         socketRef.current.off('new_message', handleNewMessage);
         socketRef.current.off('participants_list', handleParticipantsList);
         socketRef.current.off('user_joined', handleUserJoined);
         socketRef.current.off('user_left', handleUserLeft);
         socketRef.current.off('audio_recording_added', handleAudioRecordingAdded);
         socketRef.current.off('video_recording_added', handleVideoRecordingAdded);
-        socketRef.current.off('student_video_offer', handleStudentVideoOffer);
-        socketRef.current.off('student_video_stopped', handleStudentVideoStopped);
-        socketRef.current.off('student_audio_toggle', handleStudentAudioToggle);
       }
     };
-  }, [peerConnections, activeStudentScreen]);
+  }, []);
 
   useEffect(() => {
     if (teacherVideoRef.current && localStream) {
@@ -1070,58 +1091,6 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       teacherVideoRef.current.srcObject = null;
     }
   }, [localStream]);
-
-  useEffect(() => {
-    if (studentVideoRef.current && activeStudentScreen) {
-      const stream = studentScreenStreams.get(activeStudentScreen.studentSocketId);
-      
-      if (stream) {
-        console.log('Установка потока экрана студента в видео элемент:', activeStudentScreen.studentSocketId);
-        studentVideoRef.current.srcObject = stream;
-        
-        const handleLoadedMetadata = () => {
-          console.log('Видео студента готово к воспроизведению');
-          studentVideoRef.current.play().catch(err => {
-            console.error('Ошибка воспроизведения:', err);
-          });
-        };
-        
-        studentVideoRef.current.addEventListener('loadedmetadata', handleLoadedMetadata);
-        
-        return () => {
-          if (studentVideoRef.current) {
-            studentVideoRef.current.removeEventListener('loadedmetadata', handleLoadedMetadata);
-          }
-        };
-      } else {
-        console.log('Поток НЕ найден для студента:', activeStudentScreen.studentSocketId);
-        studentVideoRef.current.srcObject = null;
-      }
-    }
-    
-    if (studentVideoRef.current && activeStudentVideo) {
-      const videoStream = studentVideoStreams.get(activeStudentVideo.studentSocketId);
-      
-      if (videoStream) {
-        console.log('Установка видео потока студента:', activeStudentVideo.studentSocketId);
-        studentVideoRef.current.srcObject = videoStream;
-        
-        const handleLoadedMetadata = () => {
-          studentVideoRef.current.play().catch(err => {
-            console.error('Ошибка воспроизведения видео студента:', err);
-          });
-        };
-        
-        studentVideoRef.current.addEventListener('loadedmetadata', handleLoadedMetadata);
-        
-        return () => {
-          if (studentVideoRef.current) {
-            studentVideoRef.current.removeEventListener('loadedmetadata', handleLoadedMetadata);
-          }
-        };
-      }
-    }
-  }, [activeStudentScreen, studentScreenStreams, activeStudentVideo, studentVideoStreams]);
 
   return (
     <WebinarTeacherView
@@ -1135,7 +1104,6 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       studentsForMonitoring={studentsForMonitoring}
       connectionStatus={connectionStatus}
       localStream={localStream}
-      studentScreenStreams={studentScreenStreams}
       isTeacherBroadcasting={isTeacherBroadcasting}
       activeStudentScreen={activeStudentScreen}
       pendingScreenRequests={pendingScreenRequests}
@@ -1146,6 +1114,7 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       editingTranscription={editingTranscription}
       messagesEndRef={messagesEndRef}
       studentVideoRef={studentVideoRef}
+      studentScreenVideoRef={studentScreenVideoRef}
       teacherVideoRef={teacherVideoRef}
       socketRef={socketRef}
       startTeacherScreenShare={startTeacherScreenShare}
@@ -1167,13 +1136,11 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       localVideoStream={localStream}
       isVideoEnabled={isWebcamActive}
       isAudioEnabled={isAudioEnabled}
-      studentVideoStreams={studentVideoStreams}
       activeStudentVideo={activeStudentVideo}
       startTeacherVideo={startTeacherVideo}
       stopTeacherVideo={stopTeacherVideo}
       toggleTeacherAudio={toggleTeacherAudio}
       setActiveStudentVideo={setActiveStudentVideo}
-      // ── трансляция записи ──
       isPlaybackBroadcasting={isPlaybackBroadcasting}
       playbackRecording={playbackRecording}
       playbackState={playbackState}
@@ -1184,6 +1151,18 @@ const WebinarTeacher = ({ sessionId, teacher, onExit }) => {
       resumePlaybackBroadcast={resumePlaybackBroadcast}
       seekPlaybackBroadcast={seekPlaybackBroadcast}
       stopPlaybackBroadcast={stopPlaybackBroadcast}
+      pastMaterials={pastMaterials}
+      showPastMaterials={showPastMaterials}
+      setShowPastMaterials={setShowPastMaterials}
+      loadingMaterials={loadingMaterials}
+      fetchPastMaterials={fetchPastMaterials}
+      sessionInfo={sessionInfo}
+      generateAISummary={generateAISummary}
+      kickStudent={kickStudent}
+      studentAudioStreams={studentAudioStreams}
+      activeStudentAudio={activeStudentAudio}
+      setActiveStudentAudio={setActiveStudentAudio}
+      playbackVideoRef={playbackVideoRef}
     />
   );
 };

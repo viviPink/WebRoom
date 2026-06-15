@@ -1,4 +1,3 @@
-// dateUtils.js
 
 // Константа для смещения в часах (UTC+9)
 const TIMEZONE_OFFSET = "-9"; // часов

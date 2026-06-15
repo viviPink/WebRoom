@@ -1,9 +1,9 @@
-
+// StudentVideoPlayer.jsx
 import React, { useState, useRef, useEffect } from 'react';
 
 const API_BASE_URL = window.location.hostname.includes('tunnel4.com')
-  ? 'https://4d46289f-50f4-4151-9e9f-4860ddd78a36.tunnel4.com'
-  : 'https://10.31.119.190:3002';
+  ? ''
+  : 'https://192.168.0.20:3002';
 
 const StudentVideoPlayer = ({ recording, onClose }) => {
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -34,7 +34,25 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
 
   const hasContent = (field) => {
     const content = recording?.[field];
-    return content && content.trim().length > 0;
+    if (!content) return false;
+    if (typeof content === 'string') return content.trim().length > 0;
+    if (typeof content === 'object') {
+      if (content.text) return content.text.trim().length > 0;
+      if (content.segments) return content.segments.length > 0;
+      return Object.keys(content).length > 0;
+    }
+    return false;
+  };
+
+  const getContent = (field) => {
+    const content = recording?.[field];
+    if (!content) return '';
+    if (typeof content === 'string') return content;
+    if (typeof content === 'object') {
+      if (content.text) return content.text;
+      if (content.segments) return content;
+    }
+    return JSON.stringify(content);
   };
 
   const toggleSection = (sectionId) => {
@@ -46,8 +64,12 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
 
   const formatTime = (seconds) => {
     if (!seconds || isNaN(seconds)) return '0:00';
-    const mins = Math.floor(seconds / 60);
+    const hours = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
     const secs = Math.floor(seconds % 60);
+    if (hours > 0) {
+      return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
@@ -117,6 +139,16 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
     }
   };
 
+  const seekToTime = (time) => {
+    if (videoRef.current) {
+      videoRef.current.currentTime = time;
+      if (!isPlaying) {
+        videoRef.current.play();
+        setIsPlaying(true);
+      }
+    }
+  };
+
   useEffect(() => {
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
@@ -128,7 +160,102 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
 
   const videoUrl = `${API_BASE_URL}${recording?.filePath || recording?.recordingPath}`;
 
-  const availableSections = summaryTabs.filter(tab => hasContent(tab.field));
+  const renderContent = (tabId, content) => {
+    if (tabId === 'timed') {
+      if (typeof content === 'object' && content.segments) {
+        return (
+          <div>
+            {content.segments.map((segment, idx) => (
+              <div key={idx} className="timed-item">
+                <div 
+                  className="timed-time"
+                  onClick={() => seekToTime(segment.start)}
+                >
+                  {formatTime(segment.start)}
+                </div>
+                <div className="timed-text">{segment.text}</div>
+              </div>
+            ))}
+          </div>
+        );
+      }
+      if (typeof content === 'string') {
+        return <div className="summary-text">{content}</div>;
+      }
+      return <div className="summary-text">{JSON.stringify(content)}</div>;
+    }
+    
+    if (tabId === 'bulletPoints') {
+      const lines = typeof content === 'string' ? content.split('\n') : [];
+      return (
+        <ul className="bullet-list">
+          {lines.filter(line => line.trim()).map((point, idx) => (
+            <li key={idx} className="bullet-item">
+              {point.replace(/^[-*•]\s*/, '').replace(/^\d+[.)]\s*/, '')}
+            </li>
+          ))}
+        </ul>
+      );
+    }
+    
+    if (tabId === 'questions') {
+      const lines = typeof content === 'string' ? content.split('\n') : [];
+      return (
+        <div>
+          {lines.filter(line => line.trim()).map((q, idx) => {
+            const questionMatch = q.match(/^([^?]+[?])/);
+            if (questionMatch) {
+              const question = questionMatch[1];
+              const answer = q.substring(question.length).replace(/^[:;,-]\s*/, '');
+              return (
+                <div key={idx} className="question-item">
+                  <div className="question-text">{question}</div>
+                  {answer && <div className="question-answer">{answer}</div>}
+                </div>
+              );
+            }
+            return (
+              <div key={idx} className="question-item">
+                <div className="question-text">{q}</div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+    
+    if (tabId === 'structure') {
+      const lines = typeof content === 'string' ? content.split('\n') : [];
+      let currentTitle = '';
+      const items = [];
+      
+      lines.forEach(line => {
+        if (line.match(/^#+\s/)) {
+          currentTitle = line.replace(/^#+\s/, '');
+          items.push({ title: currentTitle, content: '' });
+        } else if (currentTitle && items.length > 0 && line.trim()) {
+          items[items.length - 1].content += line + '\n';
+        }
+      });
+      
+      if (items.length === 0) {
+        return <div className="summary-text">{content}</div>;
+      }
+      
+      return (
+        <div>
+          {items.map((item, idx) => (
+            <div key={idx} className="structure-item">
+              <div className="structure-title">{item.title}</div>
+              <div className="structure-content">{item.content.trim()}</div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+    
+    return <div className="summary-text">{content}</div>;
+  };
 
   return (
     <div className="video-player-container">
@@ -139,45 +266,44 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
           left: 0;
           right: 0;
           bottom: 0;
-          background-color: #1a1a2e;
+          background-color: #fff;
           z-index: 10000;
           display: flex;
           flex-direction: column;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
 
         .player-header {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 16px 24px;
-          background-color: #16213e;
-          border-bottom: 1px solid #2c3e5c;
+          padding: 20px 40px;
+          background-color: #fff;
+          border-bottom: 1px solid #e5e7eb;
+          flex-shrink: 0;
         }
 
         .player-title {
-          font-size: 18px;
+          font-size: 20px;
           font-weight: 600;
-          color: #fff;
+          color: #111827;
           margin: 0;
         }
 
         .close-button {
           background: none;
           border: none;
-          color: #94a3b8;
           font-size: 24px;
           cursor: pointer;
-          padding: 8px;
-          border-radius: 8px;
+          padding: 8px 16px;
+          border-radius: 12px;
           transition: all 0.2s;
-          display: flex;
-          align-items: center;
-          justify-content: center;
+          color: #6B7280;
         }
 
         .close-button:hover {
-          background-color: #2c3e5c;
-          color: #fff;
+          background-color: #f3f4f6;
+          color: #111827;
         }
 
         .main-layout {
@@ -191,7 +317,7 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
           flex: 2;
           display: flex;
           flex-direction: column;
-          background-color: #0f0f1a;
+          background-color: #f9fafb;
           position: relative;
         }
 
@@ -202,6 +328,7 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
           justify-content: center;
           background-color: #000;
           position: relative;
+          min-height: 0;
         }
 
         .video-element {
@@ -214,8 +341,10 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
         }
 
         .video-controls {
-          background: linear-gradient(to top, rgba(0,0,0,0.8), rgba(0,0,0,0));
-          padding: 20px 24px 16px;
+          background-color: #fff;
+          padding: 20px 24px 24px;
+          border-top: 1px solid #e5e7eb;
+          flex-shrink: 0;
         }
 
         .progress-bar-container {
@@ -226,7 +355,7 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
         .progress-bar {
           width: 100%;
           height: 4px;
-          background-color: #3b3b5c;
+          background-color: #e5e7eb;
           border-radius: 2px;
           position: relative;
         }
@@ -267,7 +396,6 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
         .control-button {
           background: none;
           border: none;
-          color: #fff;
           cursor: pointer;
           padding: 8px;
           border-radius: 8px;
@@ -275,14 +403,16 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
           display: flex;
           align-items: center;
           justify-content: center;
+          font-size: 18px;
+          color: #374151;
         }
 
         .control-button:hover {
-          background-color: rgba(255,255,255,0.1);
+          background-color: #f3f4f6;
         }
 
         .time-display {
-          color: #94a3b8;
+          color: #6B7280;
           font-size: 14px;
           font-family: monospace;
           margin-left: 8px;
@@ -299,7 +429,7 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
           width: 80px;
           height: 4px;
           -webkit-appearance: none;
-          background: #3b3b5c;
+          background: #e5e7eb;
           border-radius: 2px;
         }
 
@@ -317,18 +447,20 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
         }
 
         .notes-section {
-          width: 400px;
+          width: 450px;
           background-color: #fff;
           border-left: 1px solid #e5e7eb;
           display: flex;
           flex-direction: column;
           overflow-y: auto;
+          flex-shrink: 0;
         }
 
         .notes-header {
           padding: 20px 24px;
           border-bottom: 1px solid #e5e7eb;
           background-color: #fafbfc;
+          flex-shrink: 0;
         }
 
         .notes-title {
@@ -347,12 +479,15 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
         .notes-content {
           flex: 1;
           padding: 20px 24px;
+          overflow-y: auto;
         }
 
         .notes-empty {
           text-align: center;
           padding: 60px 20px;
-          color: #9CA3AF;
+          background-color: #f9fafb;
+          border-radius: 16px;
+          color: #6B7280;
         }
 
         .notes-empty p {
@@ -362,7 +497,7 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
         .summary-section {
           margin-bottom: 24px;
           border: 1px solid #e5e7eb;
-          border-radius: 12px;
+          border-radius: 16px;
           overflow: hidden;
         }
 
@@ -413,7 +548,7 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
           margin-bottom: 16px;
           padding: 12px;
           background-color: #f9fafb;
-          border-radius: 8px;
+          border-radius: 12px;
           border-left: 3px solid #7B61FF;
         }
 
@@ -423,6 +558,7 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
           color: #7B61FF;
           margin-bottom: 8px;
           cursor: pointer;
+          display: inline-block;
         }
 
         .timed-time:hover {
@@ -478,7 +614,7 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
         .question-item {
           padding: 12px;
           background-color: #f9fafb;
-          border-radius: 8px;
+          border-radius: 12px;
           margin-bottom: 12px;
         }
 
@@ -494,9 +630,13 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
           color: #6B7280;
           padding-left: 12px;
           border-left: 2px solid #7B61FF;
+          margin-top: 8px;
         }
 
         @media (max-width: 768px) {
+          .player-header {
+            padding: 16px 20px;
+          }
           .main-layout {
             flex-direction: column;
           }
@@ -509,6 +649,15 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
           }
           .volume-control {
             margin-left: 0;
+          }
+          .video-controls {
+            padding: 16px;
+          }
+          .notes-header {
+            padding: 16px 20px;
+          }
+          .notes-content {
+            padding: 16px 20px;
           }
         }
       `}</style>
@@ -586,22 +735,21 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
           <div className="notes-header">
             <h4 className="notes-title">Конспект лекции</h4>
             <p className="notes-subtitle">
-              {availableSections.length} разделов доступно
+              {summaryTabs.filter(tab => hasContent(tab.field)).length} разделов доступно
             </p>
           </div>
 
           <div className="notes-content">
-            {availableSections.length === 0 ? (
+            {summaryTabs.filter(tab => hasContent(tab.field)).length === 0 ? (
               <div className="notes-empty">
                 <p>Конспекты пока не добавлены</p>
-                <p style={{ fontSize: '13px' }}>Преподаватель скоро добавит материалы</p>
+                <p style={{ fontSize: '14px', marginTop: '8px' }}>Преподаватель скоро добавит материалы</p>
               </div>
             ) : (
               <>
                 {summaryTabs.map(tab => {
                   if (!hasContent(tab.field)) return null;
-                  
-                  const content = recording[tab.field];
+                  const content = getContent(tab.field);
                   const isExpanded = expandedSections[tab.id];
                   
                   return (
@@ -618,56 +766,7 @@ const StudentVideoPlayer = ({ recording, onClose }) => {
                       
                       {isExpanded && (
                         <div className="summary-body">
-                          {tab.id === 'timed' && typeof content === 'object' && content.segments ? (
-                            <div>
-                              {content.segments.map((segment, idx) => (
-                                <div key={idx} className="timed-item">
-                                  <div 
-                                    className="timed-time"
-                                    onClick={() => {
-                                      if (videoRef.current) {
-                                        videoRef.current.currentTime = segment.start;
-                                        videoRef.current.play();
-                                        setIsPlaying(true);
-                                      }
-                                    }}
-                                  >
-                                    {formatTime(segment.start)}
-                                  </div>
-                                  <div className="timed-text">{segment.text}</div>
-                                </div>
-                              ))}
-                            </div>
-                          ) : tab.id === 'timed' && typeof content === 'string' ? (
-                            <div className="summary-text">{content}</div>
-                          ) : tab.id === 'bulletPoints' ? (
-                            <ul className="bullet-list">
-                              {content.split('\n').filter(line => line.trim()).map((point, idx) => (
-                                <li key={idx} className="bullet-item">{point.replace(/^[-*•]\s*/, '')}</li>
-                              ))}
-                            </ul>
-                          ) : tab.id === 'questions' ? (
-                            <div>
-                              {content.split('\n').filter(line => line.trim()).map((q, idx) => {
-                                const parts = q.split(/[?:]/);
-                                if (parts.length > 1) {
-                                  return (
-                                    <div key={idx} className="question-item">
-                                      <div className="question-text">{parts[0]}?</div>
-                                      <div className="question-answer">{parts.slice(1).join(':')}</div>
-                                    </div>
-                                  );
-                                }
-                                return (
-                                  <div key={idx} className="question-item">
-                                    <div className="question-text">{q}</div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          ) : (
-                            <div className="summary-text">{content}</div>
-                          )}
+                          {renderContent(tab.id, content)}
                         </div>
                       )}
                     </div>

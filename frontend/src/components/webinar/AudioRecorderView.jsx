@@ -208,15 +208,16 @@ const AudioRecorderView = ({
             onClick={startRecording}
             style={{
               padding: '10px 20px',
-              backgroundColor: '#dc3545',
+              backgroundColor: '#EF4444',
               color: 'white',
               border: 'none',
-              borderRadius: '4px',
+              borderRadius: '8px',
               cursor: 'pointer',
               fontWeight: 'bold',
               display: 'flex',
               alignItems: 'center',
               gap: '8px'
+            
             }}
           >
             Начать запись

@@ -8,7 +8,9 @@ const StudentLoginView = ({
   error,
   loading,
   handleLogin,
-  onBack
+  onBack,
+  onRegister,
+  university
 }) => {
   const [showPassword, setShowPassword] = useState(false);
 
@@ -17,6 +19,7 @@ const StudentLoginView = ({
       {/* Header */}
       <div className="header">
         <div className="logo-section">
+          <div className="logo"></div>
           <span className="title">ВебРум</span>
         </div>
         <button onClick={onBack} className="back-button">
@@ -26,7 +29,6 @@ const StudentLoginView = ({
 
       {/* Main Content */}
       <div className="main-content">
-        {/* Left Side */}
         <div className="left-side">
           <div className="role-badge">
             <div className="badge-text">
@@ -34,19 +36,28 @@ const StudentLoginView = ({
               <span className="badge-role">Студент</span>
             </div>
           </div>
-          
+
+          {university && (
+            <div className="uni-badge">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2563EB" strokeWidth="2" style={{ flexShrink: 0 }}>
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                <polyline points="9 22 9 12 15 12 15 22"></polyline>
+              </svg>
+              <span>{university.short_name || university.name}</span>
+            </div>
+          )}
+
           <h1 className="welcome-title">С возвращением!</h1>
           <p className="welcome-text">
             Войдите в свой профиль, чтобы продолжить работу
           </p>
         </div>
 
-        {/* Right Side */}
         <div className="right-side">
           <div className="form-container">
             <h2 className="form-title">Вход в аккаунт</h2>
             <p className="form-subtitle">Введите свои данные для входа</p>
-            
+
             <div className="form-group">
               <label className="form-label">ФИО</label>
               <div className="input-wrapper">
@@ -60,10 +71,11 @@ const StudentLoginView = ({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   className="input-field"
+                  onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
                 />
               </div>
             </div>
-            
+
             <div className="form-group">
               <label className="form-label">Пароль</label>
               <div className="input-wrapper">
@@ -77,8 +89,9 @@ const StudentLoginView = ({
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="input-field"
+                  onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
                 />
-                <button 
+                <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
                   className="toggle-password"
@@ -98,18 +111,25 @@ const StudentLoginView = ({
               </div>
             </div>
 
-            <button 
+            <button
               onClick={handleLogin}
               disabled={!name.trim() || !password.trim() || loading}
               className="submit-button"
             >
               {loading ? 'Вход...' : 'Войти в аккаунт'}
             </button>
-            
+
             {error && (
-              <div className="error-message">
-                {error}
-              </div>
+              <div className="error-message">{error}</div>
+            )}
+
+            {onRegister && (
+              <p className="register-link">
+                Нет аккаунта?{' '}
+                <button onClick={onRegister} className="register-btn">
+                  Зарегистрироваться
+                </button>
+              </p>
             )}
           </div>
         </div>
@@ -128,182 +148,86 @@ const StudentLoginView = ({
           padding: 20px 40px;
           border-bottom: 1px solid #e5e7eb;
         }
-        .logo-section {
-          display: flex;
-          align-items: center;
-          gap: 12px;
+        .logo-section { display: flex; align-items: center; gap: 12px; }
+        .logo {
+          width: 48px; height: 48px;
+          background-color: #2563EB;
+          border-radius: 12px;
         }
-        .title {
-          font-size: 24px;
-          font-weight: 700;
-          color: #000;
-        }
+        .title { font-size: 24px; font-weight: 700; color: #000; }
         .back-button {
-          background: none;
-          border: none;
-          font-size: 16px;
-          color: #6B7280;
-          cursor: pointer;
-          padding: 8px 16px;
-          transition: color 0.2s;
+          background: none; border: none; font-size: 16px; color: #6B7280;
+          cursor: pointer; padding: 8px 16px; transition: color 0.2s;
         }
-        .back-button:hover {
-          color: #2563EB;
-        }
-        .main-content {
-          display: flex;
-          min-height: calc(100vh - 88px);
-        }
+        .back-button:hover { color: #2563EB; }
+        .main-content { display: flex; min-height: calc(100vh - 88px); }
         .left-side {
-          flex: 1;
-          background-color: #f0f5ff;
-          padding: 60px;
-          display: flex;
-          flex-direction: column;
-          position: relative;
+          flex: 1; background-color: #eff6ff; padding: 60px;
+          display: flex; flex-direction: column; position: relative;
         }
         .role-badge {
-          display: inline-flex;
-          align-items: center;
-          gap: 12px;
-          background-color: #fff;
-          padding: 12px 24px;
-          border-radius: 50px;
-          margin-bottom: 40px;
-          width: fit-content;
+          display: inline-flex; align-items: center; gap: 12px;
+          background-color: #fff; padding: 12px 24px; border-radius: 50px;
+          margin-bottom: 16px; width: fit-content;
           box-shadow: 0 2px 8px rgba(0,0,0,0.08);
         }
-        .badge-text {
-          display: flex;
-          flex-direction: column;
+        .badge-text { display: flex; flex-direction: column; }
+        .badge-label { font-size: 12px; color: #6B7280; }
+        .badge-role { font-size: 16px; font-weight: 600; color: #000; }
+        .uni-badge {
+          display: inline-flex; align-items: center; gap: 8px;
+          background: #dbeafe; color: #1d4ed8; padding: 8px 16px;
+          border-radius: 50px; font-size: 13px; font-weight: 500;
+          margin-bottom: 32px; width: fit-content;
         }
-        .badge-label {
-          font-size: 12px;
-          color: #6B7280;
-        }
-        .badge-role {
-          font-size: 16px;
-          font-weight: 600;
-          color: #000;
-        }
-        .welcome-title {
-          font-size: 48px;
-          font-weight: 700;
-          color: #000;
-          margin: 0 0 16px 0;
-        }
-        .welcome-text {
-          font-size: 18px;
-          color: #6B7280;
-          line-height: 1.6;
-          margin: 0;
-          max-width: 400px;
-        }
-        .right-side {
-          flex: 1;
-          background-color: #fff;
-          padding: 60px;
-          display: flex;
-          align-items: center;
-        }
-        .form-container {
-          width: 100%;
-          max-width: 480px;
-        }
-        .form-title {
-          font-size: 32px;
-          font-weight: 700;
-          color: #000;
-          margin: 0 0 8px 0;
-        }
-        .form-subtitle {
-          font-size: 16px;
-          color: #6B7280;
-          margin: 0 0 32px 0;
-        }
-        .form-group {
-          margin-bottom: 24px;
-        }
-        .form-label {
-          display: block;
-          font-size: 14px;
-          font-weight: 600;
-          color: #374151;
-          margin-bottom: 8px;
-        }
-        .input-wrapper {
-          position: relative;
-          display: flex;
-          align-items: center;
-        }
-        .input-icon {
-          position: absolute;
-          left: 16px;
-          pointer-events: none;
-        }
+        .welcome-title { font-size: 48px; font-weight: 700; color: #000; margin: 0 0 16px 0; }
+        .welcome-text { font-size: 18px; color: #6B7280; line-height: 1.6; margin: 0; max-width: 400px; }
+        .right-side { flex: 1; background-color: #fff; padding: 60px; display: flex; align-items: center; }
+        .form-container { width: 100%; max-width: 480px; }
+        .form-title { font-size: 32px; font-weight: 700; color: #000; margin: 0 0 8px 0; }
+        .form-subtitle { font-size: 16px; color: #6B7280; margin: 0 0 32px 0; }
+        .form-group { margin-bottom: 24px; }
+        .form-label { display: block; font-size: 14px; font-weight: 600; color: #374151; margin-bottom: 8px; }
+        .input-wrapper { position: relative; display: flex; align-items: center; }
+        .input-icon { position: absolute; left: 16px; pointer-events: none; }
         .input-field {
-          width: 100%;
-          padding: 14px 16px 14px 48px;
-          border: 1px solid #e5e7eb;
-          border-radius: 12px;
-          font-size: 16px;
-          transition: all 0.2s;
-          box-sizing: border-box;
+          width: 100%; padding: 14px 16px 14px 48px;
+          border: 1px solid #e5e7eb; border-radius: 12px;
+          font-size: 16px; transition: all 0.2s; box-sizing: border-box;
         }
         .input-field:focus {
-          outline: none;
-          border-color: #2563EB;
+          outline: none; border-color: #2563EB;
           box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
         }
         .toggle-password {
-          position: absolute;
-          right: 16px;
-          background: none;
-          border: none;
-          cursor: pointer;
-          padding: 0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
+          position: absolute; right: 16px; background: none; border: none;
+          cursor: pointer; padding: 0; display: flex; align-items: center;
         }
         .submit-button {
-          width: 100%;
-          padding: 16px;
-          background-color: #2563EB;
-          color: white;
-          border: none;
-          border-radius: 12px;
-          font-size: 16px;
-          font-weight: 600;
-          cursor: pointer;
-          transition: all 0.2s;
-          margin-top: 8px;
+          width: 100%; padding: 16px; background-color: #2563EB; color: white;
+          border: none; border-radius: 12px; font-size: 16px; font-weight: 600;
+          cursor: pointer; transition: all 0.2s; margin-top: 8px;
         }
         .submit-button:hover:not(:disabled) {
-          background-color: #1D4ED8;
-          transform: translateY(-2px);
+          background-color: #1D4ED8; transform: translateY(-2px);
           box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
         }
-        .submit-button:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-        }
+        .submit-button:disabled { opacity: 0.6; cursor: not-allowed; }
         .error-message {
-          margin-top: 16px;
-          padding: 12px;
-          background-color: #FEE2E2;
-          color: #DC2626;
-          border-radius: 8px;
-          text-align: center;
-          font-size: 14px;
+          margin-top: 16px; padding: 12px; background-color: #FEF2F2;
+          color: #DC2626; border-radius: 8px; text-align: center; font-size: 14px;
         }
+        .register-link {
+          margin-top: 20px; text-align: center; font-size: 14px; color: #6B7280;
+        }
+        .register-btn {
+          background: none; border: none; color: #2563EB; font-size: 14px;
+          font-weight: 600; cursor: pointer; padding: 0; text-decoration: underline;
+        }
+        .register-btn:hover { color: #1D4ED8; }
         @media (max-width: 968px) {
-          .left-side {
-            display: none;
-          }
-          .right-side {
-            padding: 40px;
-          }
+          .left-side { display: none; }
+          .right-side { padding: 40px; }
         }
       `}</style>
     </div>

@@ -1,9 +1,9 @@
-
+// TeacherVideoPlayer.jsx
 import React, { useState, useRef, useEffect } from 'react';
 
 const API_BASE_URL = window.location.hostname.includes('tunnel4.com')
-  ? 'https://4d46289f-50f4-4151-9e9f-4860ddd78a36.tunnel4.com'
-  : 'https://10.31.119.190:3002';
+  ? ''
+  : 'https://192.168.0.20:3002';
 
 const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateField }) => {
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -313,26 +313,27 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
           left: 0;
           right: 0;
           bottom: 0;
-          background-color: #1a1a2e;
+          background-color: #fff;
           z-index: 10000;
           display: flex;
           flex-direction: column;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
 
         .player-header {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 16px 24px;
-          background-color: #16213e;
-          border-bottom: 1px solid #2c3e5c;
+          padding: 20px 40px;
+          background-color: #fff;
+          border-bottom: 1px solid #e5e7eb;
           flex-shrink: 0;
         }
 
         .player-title {
-          font-size: 18px;
+          font-size: 20px;
           font-weight: 600;
-          color: #fff;
+          color: #111827;
           margin: 0;
         }
 
@@ -343,52 +344,53 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
         }
 
         .edit-recording-btn {
-          padding: 8px 16px;
-          background-color: #3b82f6;
+          padding: 8px 20px;
+          background-color: #7B61FF;
           color: white;
           border: none;
-          border-radius: 8px;
-          font-size: 13px;
+          border-radius: 12px;
+          font-size: 14px;
+          font-weight: 500;
           cursor: pointer;
           transition: all 0.2s;
         }
 
         .edit-recording-btn:hover {
-          background-color: #2563eb;
+          background-color: #6750E0;
+          transform: translateY(-1px);
         }
 
         .delete-recording-btn {
-          padding: 8px 16px;
-          background-color: #ef4444;
+          padding: 8px 20px;
+          background-color: #EF4444;
           color: white;
           border: none;
-          border-radius: 8px;
-          font-size: 13px;
+          border-radius: 12px;
+          font-size: 14px;
+          font-weight: 500;
           cursor: pointer;
           transition: all 0.2s;
         }
 
         .delete-recording-btn:hover {
-          background-color: #dc2626;
+          background-color: #DC2626;
+          transform: translateY(-1px);
         }
 
         .close-button {
           background: none;
           border: none;
-          color: #94a3b8;
           font-size: 24px;
           cursor: pointer;
-          padding: 8px;
-          border-radius: 8px;
+          padding: 8px 16px;
+          border-radius: 12px;
           transition: all 0.2s;
-          display: flex;
-          align-items: center;
-          justify-content: center;
+          color: #6B7280;
         }
 
         .close-button:hover {
-          background-color: #2c3e5c;
-          color: #fff;
+          background-color: #f3f4f6;
+          color: #111827;
         }
 
         .main-layout {
@@ -402,7 +404,7 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
           flex: 2;
           display: flex;
           flex-direction: column;
-          background-color: #0f0f1a;
+          background-color: #f9fafb;
           position: relative;
         }
 
@@ -426,8 +428,9 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
         }
 
         .video-controls {
-          background: linear-gradient(to top, rgba(0,0,0,0.8), rgba(0,0,0,0));
-          padding: 20px 24px 16px;
+          background-color: #fff;
+          padding: 20px 24px 24px;
+          border-top: 1px solid #e5e7eb;
           flex-shrink: 0;
         }
 
@@ -439,7 +442,7 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
         .progress-bar {
           width: 100%;
           height: 4px;
-          background-color: #3b3b5c;
+          background-color: #e5e7eb;
           border-radius: 2px;
           position: relative;
         }
@@ -480,7 +483,6 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
         .control-button {
           background: none;
           border: none;
-          color: #fff;
           cursor: pointer;
           padding: 8px;
           border-radius: 8px;
@@ -489,14 +491,15 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
           align-items: center;
           justify-content: center;
           font-size: 18px;
+          color: #374151;
         }
 
         .control-button:hover {
-          background-color: rgba(255,255,255,0.1);
+          background-color: #f3f4f6;
         }
 
         .time-display {
-          color: #94a3b8;
+          color: #6B7280;
           font-size: 14px;
           font-family: monospace;
           margin-left: 8px;
@@ -513,7 +516,7 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
           width: 80px;
           height: 4px;
           -webkit-appearance: none;
-          background: #3b3b5c;
+          background: #e5e7eb;
           border-radius: 2px;
         }
 
@@ -567,21 +570,6 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
           margin: 0;
         }
 
-        .transcribe-btn {
-          padding: 8px 16px;
-          background-color: #7B61FF;
-          color: white;
-          border: none;
-          border-radius: 8px;
-          font-size: 13px;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-
-        .transcribe-btn:hover {
-          background-color: #6750E0;
-        }
-
         .notes-content {
           flex: 1;
           padding: 20px 24px;
@@ -591,7 +579,9 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
         .notes-empty {
           text-align: center;
           padding: 60px 20px;
-          color: #9CA3AF;
+          background-color: #f9fafb;
+          border-radius: 16px;
+          color: #6B7280;
         }
 
         .notes-empty p {
@@ -601,7 +591,7 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
         .summary-section {
           margin-bottom: 24px;
           border: 1px solid #e5e7eb;
-          border-radius: 12px;
+          border-radius: 16px;
           overflow: hidden;
         }
 
@@ -611,18 +601,19 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
           align-items: center;
           padding: 16px 20px;
           background-color: #f9fafb;
-          cursor: pointer;
           transition: background-color 0.2s;
-        }
-
-        .summary-header:hover {
-          background-color: #f3f4f6;
         }
 
         .summary-label {
           font-weight: 600;
           color: #111827;
           font-size: 15px;
+          cursor: pointer;
+          flex: 1;
+        }
+
+        .summary-label:hover {
+          color: #7B61FF;
         }
 
         .summary-actions {
@@ -631,27 +622,35 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
           align-items: center;
         }
 
-        .expand-icon {
-          color: #6B7280;
-          font-size: 18px;
-          transition: transform 0.2s;
-        }
-
-        .expand-icon.expanded {
-          transform: rotate(180deg);
-        }
-
         .edit-icon {
           color: #6B7280;
           font-size: 14px;
           cursor: pointer;
-          padding: 4px;
-          border-radius: 4px;
+          padding: 4px 8px;
+          border-radius: 8px;
+          transition: all 0.2s;
         }
 
         .edit-icon:hover {
           background-color: #e5e7eb;
           color: #111827;
+        }
+
+        .expand-icon {
+          color: #6B7280;
+          font-size: 18px;
+          transition: transform 0.2s;
+          cursor: pointer;
+          padding: 4px;
+          border-radius: 8px;
+        }
+
+        .expand-icon:hover {
+          background-color: #e5e7eb;
+        }
+
+        .expand-icon.expanded {
+          transform: rotate(180deg);
         }
 
         .summary-body {
@@ -671,7 +670,7 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
           margin-bottom: 16px;
           padding: 12px;
           background-color: #f9fafb;
-          border-radius: 8px;
+          border-radius: 12px;
           border-left: 3px solid #7B61FF;
         }
 
@@ -737,7 +736,7 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
         .question-item {
           padding: 12px;
           background-color: #f9fafb;
-          border-radius: 8px;
+          border-radius: 12px;
           margin-bottom: 12px;
         }
 
@@ -760,10 +759,16 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
           width: 100%;
           padding: 12px;
           border: 1px solid #e5e7eb;
-          border-radius: 8px;
+          border-radius: 12px;
           font-size: 14px;
           font-family: monospace;
           resize: vertical;
+          outline: none;
+        }
+
+        .edit-textarea:focus {
+          border-color: #7B61FF;
+          box-shadow: 0 0 0 3px rgba(123, 97, 255, 0.1);
         }
 
         .edit-actions {
@@ -773,12 +778,15 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
         }
 
         .edit-save {
-          padding: 8px 16px;
+          padding: 8px 20px;
           background-color: #10B981;
           color: white;
           border: none;
-          border-radius: 8px;
+          border-radius: 12px;
+          font-size: 14px;
+          font-weight: 500;
           cursor: pointer;
+          transition: all 0.2s;
         }
 
         .edit-save:hover {
@@ -786,12 +794,15 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
         }
 
         .edit-cancel {
-          padding: 8px 16px;
+          padding: 8px 20px;
           background-color: #f3f4f6;
           color: #374151;
           border: 1px solid #e5e7eb;
-          border-radius: 8px;
+          border-radius: 12px;
+          font-size: 14px;
+          font-weight: 500;
           cursor: pointer;
+          transition: all 0.2s;
         }
 
         .edit-cancel:hover {
@@ -799,6 +810,11 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
         }
 
         @media (max-width: 768px) {
+          .player-header {
+            padding: 16px 20px;
+            flex-wrap: wrap;
+            gap: 12px;
+          }
           .main-layout {
             flex-direction: column;
           }
@@ -816,9 +832,13 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
             padding: 16px;
           }
           .notes-header {
+            padding: 16px 20px;
             flex-direction: column;
             gap: 12px;
             align-items: stretch;
+          }
+          .notes-content {
+            padding: 16px 20px;
           }
         }
       `}</style>
@@ -918,7 +938,7 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
             {summaryTabs.filter(tab => hasContent(tab.field)).length === 0 ? (
               <div className="notes-empty">
                 <p>Конспекты пока не добавлены</p>
-                <p style={{ fontSize: '13px' }}>Нажмите на иконку редактирования чтобы добавить конспект</p>
+                <p style={{ fontSize: '14px', marginTop: '8px' }}>Нажмите на иконку редактирования чтобы добавить конспект</p>
               </div>
             ) : (
               <>
@@ -930,13 +950,10 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
                   
                   return (
                     <div key={tab.id} className="summary-section">
-                      <div 
-                        className="summary-header"
-                      >
+                      <div className="summary-header">
                         <span 
                           className="summary-label"
                           onClick={() => toggleSection(tab.id)}
-                          style={{ cursor: 'pointer', flex: 1 }}
                         >
                           {tab.label}
                         </span>
@@ -953,7 +970,6 @@ const TeacherVideoPlayer = ({ recording, onClose, onEdit, onDelete, onUpdateFiel
                           <span 
                             className={`expand-icon ${isExpanded ? 'expanded' : ''}`}
                             onClick={() => toggleSection(tab.id)}
-                            style={{ cursor: 'pointer' }}
                           >
                             ▼
                           </span>

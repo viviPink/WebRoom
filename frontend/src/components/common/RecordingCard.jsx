@@ -115,7 +115,7 @@ const RecordingCard = ({ recording, onEdit, onDelete, onTranscribe, onEnhanceTex
   };
 
   const getTypeIcon = () => {
-    return recording.type === 'video' ? '📹' : '🎙️';
+    return recording.type === 'video' ? 'VID' : 'AUD';
   };
 
   // Очистка при размонтировании

@@ -2,12 +2,10 @@ import React, { useState } from 'react';
 import TeacherLoginView from './TeacherLoginView';
 
 const API_BASE_URL = window.location.hostname.includes('tunnel4.com')
-  ? 'https://4d46289f-50f4-4151-9e9f-4860ddd78a36.tunnel4.com'
-  : 'https://10.121.104.190:3002';
+  ? ''  
+  : 'https://192.168.0.20:3002';
 
-
-
-const TeacherLogin = ({ setTeacher, onBack }) => {
+const TeacherLogin = ({ setTeacher, onBack, onRegister, university }) => {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [error, setError] = useState('');
@@ -18,19 +16,23 @@ const TeacherLogin = ({ setTeacher, onBack }) => {
       setError('Заполните все поля');
       return;
     }
-    
+
     setError('');
     setLoading(true);
-    
+
     try {
       const response = await fetch(`${API_BASE_URL}/api/teacher/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email })
+        body: JSON.stringify({
+          name,
+          email,
+          universityId: university?.id || null
+        })
       });
-      
+
       const data = await response.json();
-      
+
       if (!response.ok) {
         if (response.status === 404) {
           setError('Преподаватель с таким именем и email не найден');
@@ -39,7 +41,7 @@ const TeacherLogin = ({ setTeacher, onBack }) => {
         }
         return;
       }
-      
+
       if (data.id) {
         setTeacher(data);
       }
@@ -61,6 +63,8 @@ const TeacherLogin = ({ setTeacher, onBack }) => {
       loading={loading}
       handleLogin={handleLogin}
       onBack={onBack}
+      onRegister={onRegister}
+      university={university}
     />
   );
 };
